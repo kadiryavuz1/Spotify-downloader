@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: spotify-downloader
+    env: node
+    buildCommand: |
+      apt-get update -y
+      apt-get install -y ffmpeg python3-pip
+      pip3 install yt-dlp
+      npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: CLIENT_URL
+        value: https://spotify-downloader.onrender.com
+    healthCheckPath: /
+    autoDeploy: true
