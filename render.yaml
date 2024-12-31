@@ -2,12 +2,12 @@ services:
   - type: web
     name: spotify-downloader
     env: node
-    buildCommand: |
+    buildCommand: npm run render-build
+    startCommand: npm start
+    preDeployCommand: |
       apt-get update -y
       apt-get install -y ffmpeg python3-pip
       pip3 install yt-dlp
-      npm run render-build
-    startCommand: npm start
     envVars:
       - key: NODE_ENV
         value: production
