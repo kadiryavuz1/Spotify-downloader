@@ -13,5 +13,9 @@ services:
         value: production
       - key: CLIENT_URL
         value: https://spotify-downloader.onrender.com
+      - key: SPOTIFY_CLIENT_ID
+        value: b0ad6d6cea8b4727a4d391ccc8f5c110
+      - key: SPOTIFY_CLIENT_SECRET
+        value: 4ed3757cf3914fc5a2ddc4e93c81d781
     healthCheckPath: /
     autoDeploy: true

@@ -2,12 +2,69 @@ const express = require("express");
 const cors = require("cors");
 const SpotifyWebApi = require("spotify-web-api-node");
 const axios = require("axios");
-const { spawn } = require("child_process");
+const { spawn, execSync } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 const archiver = require("archiver");
 require("dotenv").config();
 
+// Function to check if a command exists
+function commandExists(command) {
+  try {
+    execSync(`which ${command}`, { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Function to install prerequisites
+async function installPrerequisites() {
+  console.log("Checking prerequisites...");
+
+  // Check and install yt-dlp
+  if (!commandExists("yt-dlp")) {
+    console.log("Installing yt-dlp...");
+    try {
+      if (process.platform === "darwin") {
+        // macOS
+        execSync("brew install yt-dlp");
+      } else if (process.platform === "linux") {
+        execSync(
+          "sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp"
+        );
+        execSync("sudo chmod a+rx /usr/local/bin/yt-dlp");
+      }
+      console.log("yt-dlp installed successfully");
+    } catch (error) {
+      console.error("Error installing yt-dlp:", error);
+      throw new Error("Failed to install yt-dlp");
+    }
+  } else {
+    console.log("yt-dlp is already installed");
+  }
+
+  // Check and install ffmpeg
+  if (!commandExists("ffmpeg")) {
+    console.log("Installing ffmpeg...");
+    try {
+      if (process.platform === "darwin") {
+        // macOS
+        execSync("brew install ffmpeg");
+      } else if (process.platform === "linux") {
+        execSync("sudo apt-get update && sudo apt-get install -y ffmpeg");
+      }
+      console.log("ffmpeg installed successfully");
+    } catch (error) {
+      console.error("Error installing ffmpeg:", error);
+      throw new Error("Failed to install ffmpeg");
+    }
+  } else {
+    console.log("ffmpeg is already installed");
+  }
+}
+
+// Initialize Express app
 const app = express();
 
 // Create downloads directory if it doesn't exist
@@ -20,16 +77,20 @@ if (!fs.existsSync(downloadsDir)) {
 app.use(express.json());
 app.use(
   cors({
-    origin: "http://localhost:3001",
+    origin:
+      process.env.NODE_ENV === "production"
+        ? process.env.CLIENT_URL
+        : "http://localhost:3001",
     methods: ["GET", "POST"],
     allowedHeaders: ["Content-Type"],
   })
 );
 
-// Initialize Spotify API client
+// Initialize Spotify API client with environment variables
 const spotifyApi = new SpotifyWebApi({
-  clientId: process.env.SPOTIFY_CLIENT_ID,
-  clientSecret: process.env.SPOTIFY_CLIENT_SECRET,
+  clientId: process.env.SPOTIFY_CLIENT_ID || "b0ad6d6cea8b4727a4d391ccc8f5c110",
+  clientSecret:
+    process.env.SPOTIFY_CLIENT_SECRET || "4ed3757cf3914fc5a2ddc4e93c81d781",
 });
 
 // Refresh Spotify access token
@@ -638,7 +699,26 @@ app.post("/api/download-playlist", async (req, res) => {
   }
 });
 
+// Add this after other middleware setup
+if (process.env.NODE_ENV === "production") {
+  // Serve static files from the React build directory
+  app.use(express.static(path.join(__dirname, "client/build")));
+
+  // Handle React routing, return all requests to React app
+  app.get("*", function (req, res) {
+    res.sendFile(path.join(__dirname, "client/build", "index.html"));
+  });
+}
+
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+(async () => {
+  try {
+    await installPrerequisites();
+    app.listen(PORT, () => {
+      console.log(`Server running on port ${PORT}`);
+    });
+  } catch (error) {
+    console.error("Failed to start server:", error);
+    process.exit(1);
+  }
+})();
