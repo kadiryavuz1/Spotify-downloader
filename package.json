@@ -7,7 +7,7 @@
     "start": "node server.js",
     "dev": "nodemon server.js",
     "build": "cd client && npm install && npm run build",
-    "render-build": "npm install && npm run build"
+    "render-build": "npm install && cd client && npm install @babel/plugin-proposal-private-property-in-object && npm install && npm run build"
   },
   "dependencies": {
     "archiver": "^5.3.1",
