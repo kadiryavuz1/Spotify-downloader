@@ -18,52 +18,24 @@ function commandExists(command) {
   }
 }
 
-// Function to install prerequisites
+// Function to check prerequisites
 async function installPrerequisites() {
   console.log("Checking prerequisites...");
 
-  // Check and install yt-dlp
+  // Check for yt-dlp
   if (!commandExists("yt-dlp")) {
-    console.log("Installing yt-dlp...");
-    try {
-      if (process.platform === "darwin") {
-        // macOS
-        execSync("brew install yt-dlp");
-      } else if (process.platform === "linux") {
-        // Linux - without sudo
-        execSync(
-          "curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o yt-dlp"
-        );
-        execSync("chmod a+rx yt-dlp");
-        execSync("mv yt-dlp /usr/local/bin/");
-      }
-      console.log("yt-dlp installed successfully");
-    } catch (error) {
-      console.error("Error installing yt-dlp:", error);
-      throw new Error("Failed to install yt-dlp");
-    }
+    console.error("yt-dlp is not installed");
+    throw new Error("yt-dlp is not installed");
   } else {
-    console.log("yt-dlp is already installed");
+    console.log("yt-dlp is available");
   }
 
-  // Check and install ffmpeg
+  // Check for ffmpeg
   if (!commandExists("ffmpeg")) {
-    console.log("Installing ffmpeg...");
-    try {
-      if (process.platform === "darwin") {
-        // macOS
-        execSync("brew install ffmpeg");
-      } else if (process.platform === "linux") {
-        // Linux - without sudo
-        execSync("apt-get update && apt-get install -y ffmpeg");
-      }
-      console.log("ffmpeg installed successfully");
-    } catch (error) {
-      console.error("Error installing ffmpeg:", error);
-      throw new Error("Failed to install ffmpeg");
-    }
+    console.error("ffmpeg is not installed");
+    throw new Error("ffmpeg is not installed");
   } else {
-    console.log("ffmpeg is already installed");
+    console.log("ffmpeg is available");
   }
 }
 
