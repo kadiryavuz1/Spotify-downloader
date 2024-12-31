@@ -30,10 +30,12 @@ async function installPrerequisites() {
         // macOS
         execSync("brew install yt-dlp");
       } else if (process.platform === "linux") {
+        // Linux - without sudo
         execSync(
-          "sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp"
+          "curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o yt-dlp"
         );
-        execSync("sudo chmod a+rx /usr/local/bin/yt-dlp");
+        execSync("chmod a+rx yt-dlp");
+        execSync("mv yt-dlp /usr/local/bin/");
       }
       console.log("yt-dlp installed successfully");
     } catch (error) {
@@ -52,7 +54,8 @@ async function installPrerequisites() {
         // macOS
         execSync("brew install ffmpeg");
       } else if (process.platform === "linux") {
-        execSync("sudo apt-get update && sudo apt-get install -y ffmpeg");
+        // Linux - without sudo
+        execSync("apt-get update && apt-get install -y ffmpeg");
       }
       console.log("ffmpeg installed successfully");
     } catch (error) {

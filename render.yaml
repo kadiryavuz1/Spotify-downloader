@@ -5,8 +5,10 @@ services:
     buildCommand: npm run render-build
     startCommand: npm start
     preDeployCommand: |
+      mkdir -p /usr/local/bin
+      chmod 777 /usr/local/bin
       apt-get update -y
-      apt-get install -y ffmpeg python3-pip
+      apt-get install -y ffmpeg python3-pip curl
       pip3 install yt-dlp
     envVars:
       - key: NODE_ENV
