@@ -1,56 +1,60 @@
-import React, { useState, useEffect } from "react";
+import React, { useState } from "react";
 import {
   Container,
   TextField,
   Button,
-  Typography,
   Card,
   CardContent,
-  CardMedia,
+  Typography,
   Box,
   CircularProgress,
-  LinearProgress,
+  InputAdornment,
+  CardMedia,
+  MenuItem,
 } from "@mui/material";
 import axios from "axios";
+import YouTubeIcon from "@mui/icons-material/YouTube";
+import AudioFileIcon from "@mui/icons-material/AudioFile";
+import VideoFileIcon from "@mui/icons-material/VideoFile";
 
 function App() {
   const [url, setUrl] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
   const [content, setContent] = useState(null);
-  const [downloadProgress, setDownloadProgress] = useState(0);
+  const [error, setError] = useState(null);
+  const [loading, setLoading] = useState(false);
   const [downloadStatus, setDownloadStatus] = useState(null);
-  const [currentTrack, setCurrentTrack] = useState(null);
-  const [estimatedTime, setEstimatedTime] = useState(null);
-  const [showProgress, setShowProgress] = useState(false);
-  const [abortController, setAbortController] = useState(null);
+  const [isYouTube, setIsYouTube] = useState(false);
+  const [videoInfo, setVideoInfo] = useState(null);
+  const [selectedResolution, setSelectedResolution] = useState("720p");
 
-  useEffect(() => {
-    if (downloadProgress === 100) {
-      const timer = setTimeout(() => {
-        setShowProgress(false);
-        setDownloadStatus(null);
-        setCurrentTrack(null);
-        setEstimatedTime(null);
-      }, 4000);
-      return () => clearTimeout(timer);
-    }
-  }, [downloadProgress]);
+  const resolutionOptions = [
+    { label: "360p", value: "360" },
+    { label: "480p", value: "480" },
+    { label: "720p", value: "720" },
+    { label: "1080p", value: "1080" },
+  ];
+
+  const isYouTubeUrl = (url) => {
+    return url.includes("youtube.com/") || url.includes("youtu.be/");
+  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    if (!url) return;
+
     setLoading(true);
-    setError("");
+    setError(null);
     setContent(null);
-    setDownloadProgress(0);
-    setDownloadStatus(null);
-    setCurrentTrack(null);
+    setVideoInfo(null);
 
     try {
-      const response = await axios.post("http://localhost:3000/api/info", {
-        url,
-      });
-      setContent(response.data);
+      if (isYouTube) {
+        const response = await axios.post("/api/youtube-info", { url });
+        setVideoInfo(response.data);
+      } else {
+        const response = await axios.post("/api/info", { url });
+        setContent(response.data);
+      }
     } catch (err) {
       setError(err.response?.data?.error || "An error occurred");
     } finally {
@@ -58,213 +62,214 @@ function App() {
     }
   };
 
-  const handleAbort = () => {
-    if (abortController) {
-      abortController.abort();
-      setDownloadStatus("Download aborted");
-      setShowProgress(false);
-      setTimeout(() => {
-        setDownloadStatus(null);
-        setCurrentTrack(null);
-        setEstimatedTime(null);
-        setDownloadProgress(0);
-      }, 4000);
-    }
+  const triggerDownload = (url, filename) => {
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   };
 
   const handleDownload = async (track) => {
     try {
-      setShowProgress(true);
-      setDownloadProgress(0);
-      setDownloadStatus("Searching YouTube...");
-      setCurrentTrack({ name: track.name, current: 1, total: 1 });
-      setError("");
+      setLoading(true);
+      setError(null);
+      setDownloadStatus(
+        "Preparing download... this make take some time please wait"
+      );
 
-      const controller = new AbortController();
-      setAbortController(controller);
-
-      const response = await fetch("http://localhost:3000/api/download", {
+      const response = await axios({
+        url: "/api/download",
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
+        data: {
           track_name: track.name,
           artist_name: track.artist,
-        }),
-        signal: controller.signal,
+        },
+        responseType: "blob",
+        headers: {
+          Accept: "audio/mpeg",
+        },
       });
 
-      if (!response.ok) {
-        throw new Error("Download failed");
+      if (response.data.size === 0) {
+        throw new Error("Received empty file");
       }
 
-      const reader = response.body.getReader();
-      const contentLength = +response.headers.get("Content-Length") || 0;
-      let receivedLength = 0;
-      let chunks = [];
+      const blob = new Blob([response.data], { type: "audio/mpeg" });
+      const downloadUrl = window.URL.createObjectURL(blob);
 
-      while (true) {
-        const { done, value } = await reader.read();
-
-        if (done) {
-          break;
-        }
-
-        chunks.push(value);
-        receivedLength += value.length;
-
-        if (contentLength > 0) {
-          const progress = (receivedLength / contentLength) * 100;
-          setDownloadProgress(Math.round(progress));
-        }
-      }
-
-      setDownloadStatus("Preparing download...");
-      const blob = new Blob(chunks, { type: "audio/mpeg" });
-      const url = window.URL.createObjectURL(blob);
       const link = document.createElement("a");
-      link.href = url;
-      link.setAttribute("download", `${track.name}.mp3`);
+      link.href = downloadUrl;
+      link.download = `${track.name}.mp3`;
       document.body.appendChild(link);
-      setDownloadStatus("Starting download...");
       link.click();
-      link.remove();
-      window.URL.revokeObjectURL(url);
-      setDownloadProgress(100);
+      document.body.removeChild(link);
+
+      window.URL.revokeObjectURL(downloadUrl);
       setDownloadStatus("Download complete!");
+      setTimeout(() => setDownloadStatus(null), 3000);
     } catch (err) {
-      if (err.name === "AbortError") {
-        setError("Download aborted");
-      } else {
-        setError("Download failed");
-        console.error("Download error:", err);
-      }
+      console.error("Download error:", err);
+      setError(err.response?.data?.error || "Download failed");
+      setDownloadStatus("Download failed");
     } finally {
-      setAbortController(null);
+      setLoading(false);
     }
   };
 
-  const handleDownloadPlaylist = async () => {
-    if (!content || content.type !== "playlist" || !content.tracks) return;
-
+  const handleYouTubeDownload = async (format) => {
     try {
-      setShowProgress(true);
-      setDownloadProgress(0);
-      setDownloadStatus("Preparing playlist download...");
-      setError("");
-
-      const controller = new AbortController();
-      setAbortController(controller);
-
-      // Start the download process and get the progress ID
-      const response = await fetch(
-        "http://localhost:3000/api/download-playlist",
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            tracks: content.tracks,
-            playlistName: content.name,
-          }),
-          signal: controller.signal,
-        }
+      setLoading(true);
+      setError(null);
+      setDownloadStatus(
+        "Preparing for download... This May Take Some Time Please Wait"
       );
 
-      if (!response.ok) {
-        throw new Error("Playlist download failed");
-      }
-
-      const { progressId } = await response.json();
-
-      // Connect to the progress endpoint
-      const progressSource = new EventSource(
-        `http://localhost:3000/api/download-progress/${progressId}`
-      );
-
-      // Create an abort handler that will close the EventSource
-      const abortHandler = {
-        abort: () => {
-          progressSource.close();
-          controller.abort();
-          fetch(
-            `http://localhost:3000/api/download-playlist/${progressId}/abort`,
-            {
-              method: "POST",
-            }
-          ).catch(console.error);
+      const response = await axios({
+        url: "/api/youtube-download",
+        method: "POST",
+        data: {
+          url,
+          format,
+          resolution: format === "video" ? selectedResolution : null,
         },
-      };
-      setAbortController(abortHandler);
+        responseType: "blob",
+        headers: {
+          Accept: format === "audio" ? "audio/mpeg" : "video/mp4",
+        },
+      });
 
-      progressSource.onmessage = (event) => {
-        const data = JSON.parse(event.data);
-
-        if (data.status === "error") {
-          setError(data.error);
-          progressSource.close();
-          setAbortController(null);
-          return;
-        }
-
-        if (data.status === "ready") {
-          // Download is ready, get the file
-          progressSource.close();
-          setDownloadStatus("Starting download...");
-          window.location.href = `http://localhost:3000${data.downloadUrl}`;
-          setTimeout(() => {
-            setShowProgress(false);
-            setDownloadStatus(null);
-            setCurrentTrack(null);
-            setEstimatedTime(null);
-          }, 4000);
-          return;
-        }
-
-        if (data.status) setDownloadStatus(data.status);
-        if (data.progress) setDownloadProgress(Math.round(data.progress));
-        if (data.currentTrack) setCurrentTrack(data.currentTrack);
-      };
-
-      progressSource.onerror = () => {
-        progressSource.close();
-        setError("Lost connection to server");
-        setAbortController(null);
-      };
-    } catch (err) {
-      if (err.name === "AbortError") {
-        setError("Download aborted");
-      } else {
-        setError("Playlist download failed");
-        console.error("Playlist download error:", err);
+      if (response.data.size === 0) {
+        throw new Error("Received empty file");
       }
+
+      const blob = new Blob([response.data], {
+        type: format === "audio" ? "audio/mpeg" : "video/mp4",
+      });
+      const downloadUrl = window.URL.createObjectURL(blob);
+      const filename = `youtube-download.${format === "audio" ? "mp3" : "mp4"}`;
+
+      const link = document.createElement("a");
+      link.href = downloadUrl;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+
+      window.URL.revokeObjectURL(downloadUrl);
+      setDownloadStatus("Download complete!");
+      setTimeout(() => setDownloadStatus(null), 3000);
+    } catch (err) {
+      console.error("Download error:", err);
+      setError(err.response?.data?.error || "Download failed");
+      setDownloadStatus("Download failed");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleUrlChange = (event) => {
+    const newUrl = event.target.value;
+    setUrl(newUrl);
+    setIsYouTube(isYouTubeUrl(newUrl));
+    setContent(null);
+    setError(null);
+    setDownloadStatus(null);
+  };
+
+  const downloadPlaylist = async (tracks, playlistName) => {
+    try {
+      setLoading(true);
+      setError(null);
+      setDownloadStatus("Preparing playlist download...");
+
+      const response = await axios.post("/api/download-playlist", {
+        tracks,
+        playlistName,
+      });
+
+      if (!response.data.tracks || response.data.tracks.length === 0) {
+        throw new Error("No tracks received from server");
+      }
+
+      for (let i = 0; i < response.data.tracks.length; i++) {
+        const track = response.data.tracks[i];
+        setDownloadStatus(
+          `Downloading track ${i + 1} of ${response.data.tracks.length}`
+        );
+
+        const downloadResponse = await axios({
+          url: track.url,
+          method: "GET",
+          responseType: "blob",
+          headers: {
+            Accept: "audio/mpeg",
+          },
+        });
+
+        if (downloadResponse.data.size === 0) {
+          console.warn(`Empty file received for track: ${track.name}`);
+          continue;
+        }
+
+        const blob = new Blob([downloadResponse.data], { type: "audio/mpeg" });
+        const downloadUrl = window.URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = downloadUrl;
+        link.download = `${track.name}.mp3`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        window.URL.revokeObjectURL(downloadUrl);
+
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+
+      setDownloadStatus("All downloads completed!");
+      setTimeout(() => setDownloadStatus(null), 3000);
+    } catch (error) {
+      console.error("Download error:", error);
+      setError(error.response?.data?.error || "Download failed");
+      setDownloadStatus("Download failed");
+    } finally {
+      setLoading(false);
     }
   };
 
   return (
     <Container maxWidth="sm" sx={{ mt: 4 }}>
       <Typography variant="h4" component="h1" gutterBottom align="center">
-        Spotify Downloader
+        Spotify & YouTube Downloader
       </Typography>
 
       <form onSubmit={handleSubmit}>
         <Box sx={{ display: "flex", gap: 1, mb: 2 }}>
           <TextField
             fullWidth
-            label="Spotify URL"
-            value={url}
-            onChange={(e) => setUrl(e.target.value)}
+            label={isYouTube ? "YouTube URL" : "Spotify URL"}
             variant="outlined"
+            value={url}
+            onChange={handleUrlChange}
+            disabled={loading}
+            InputProps={{
+              startAdornment: (
+                <InputAdornment position="start">
+                  {isYouTube ? (
+                    <YouTubeIcon color="error" />
+                  ) : (
+                    <YouTubeIcon color="disabled" />
+                  )}
+                </InputAdornment>
+              ),
+            }}
             error={!!error}
             helperText={error}
-            disabled={showProgress}
           />
           <Button
             type="submit"
             variant="contained"
-            disabled={loading || showProgress}
+            disabled={loading}
             sx={{ minWidth: "100px" }}
           >
             {loading ? <CircularProgress size={24} /> : "Search"}
@@ -272,41 +277,76 @@ function App() {
         </Box>
       </form>
 
-      {showProgress && (
-        <Box sx={{ width: "100%", mb: 2 }}>
-          <LinearProgress variant="determinate" value={downloadProgress} />
-          <Box sx={{ mt: 1, mb: 1 }}>
-            <Typography variant="body2" color="text.secondary" align="center">
-              {downloadStatus}
-            </Typography>
-            {currentTrack && (
-              <Typography variant="body2" color="text.secondary" align="center">
-                Processing: {currentTrack.name} ({currentTrack.current}/
-                {currentTrack.total})
-              </Typography>
-            )}
-            {estimatedTime && (
-              <Typography variant="body2" color="text.secondary" align="center">
-                {estimatedTime}
-              </Typography>
-            )}
-            <Typography variant="body2" color="text.secondary" align="center">
-              {Math.round(downloadProgress)}%
-            </Typography>
-          </Box>
-          <Button
-            variant="outlined"
-            color="error"
-            onClick={handleAbort}
-            fullWidth
-            disabled={!abortController}
-          >
-            Abort Download
-          </Button>
-        </Box>
+      {downloadStatus && (
+        <Typography
+          variant="body2"
+          color="text.secondary"
+          align="center"
+          sx={{ mt: 2, mb: 2 }}
+        >
+          {downloadStatus}
+        </Typography>
       )}
 
-      {content && (
+      {videoInfo && (
+        <Card sx={{ mt: 2 }}>
+          <CardContent>
+            {videoInfo.thumbnail && (
+              <CardMedia
+                component="img"
+                height="300"
+                image={videoInfo.thumbnail}
+                alt={videoInfo.title}
+                sx={{ objectFit: "contain" }}
+              />
+            )}
+            <Typography variant="h6" component="div">
+              {videoInfo.title}
+            </Typography>
+            <Typography color="text.secondary">{videoInfo.author}</Typography>
+            <Box
+              sx={{ mt: 2, display: "flex", gap: 2, flexDirection: "column" }}
+            >
+              <Box sx={{ display: "flex", gap: 2, justifyContent: "center" }}>
+                <Button
+                  variant="contained"
+                  startIcon={<AudioFileIcon />}
+                  onClick={() => handleYouTubeDownload("audio")}
+                  disabled={loading || !url}
+                >
+                  Download MP3
+                </Button>
+                <Button
+                  variant="contained"
+                  startIcon={<VideoFileIcon />}
+                  onClick={() => handleYouTubeDownload("video")}
+                  disabled={loading || !url}
+                >
+                  Download Video
+                </Button>
+              </Box>
+              <Box sx={{ display: "flex", justifyContent: "center" }}>
+                <TextField
+                  select
+                  label="Video Quality"
+                  value={selectedResolution}
+                  onChange={(e) => setSelectedResolution(e.target.value)}
+                  disabled={loading}
+                  sx={{ width: "200px" }}
+                >
+                  {resolutionOptions.map((option) => (
+                    <MenuItem key={option.value} value={option.value}>
+                      {option.label}
+                    </MenuItem>
+                  ))}
+                </TextField>
+              </Box>
+            </Box>
+          </CardContent>
+        </Card>
+      )}
+
+      {content && !isYouTube && (
         <Card sx={{ mt: 2 }}>
           <CardContent>
             {content.type === "track" ? (
@@ -330,9 +370,9 @@ function App() {
                   variant="contained"
                   onClick={() => handleDownload(content.info)}
                   sx={{ mt: 2 }}
-                  disabled={showProgress}
+                  disabled={loading}
                 >
-                  Download
+                  {loading ? "Downloading..." : "Download"}
                 </Button>
               </>
             ) : content.type === "playlist" ? (
@@ -342,11 +382,11 @@ function App() {
                 </Typography>
                 <Button
                   variant="contained"
-                  onClick={handleDownloadPlaylist}
+                  onClick={() => downloadPlaylist(content.tracks, content.name)}
                   sx={{ mb: 2 }}
-                  disabled={showProgress}
+                  disabled={loading}
                 >
-                  Download Entire Playlist
+                  {loading ? "Downloading..." : "Download Entire Playlist"}
                 </Button>
                 {content.tracks.map((track, index) => (
                   <Box key={track.id} sx={{ mb: 2 }}>
@@ -361,9 +401,9 @@ function App() {
                       size="small"
                       onClick={() => handleDownload(track)}
                       sx={{ mt: 1 }}
-                      disabled={showProgress}
+                      disabled={loading}
                     >
-                      Download
+                      {loading ? "Downloading..." : "Download"}
                     </Button>
                   </Box>
                 ))}
