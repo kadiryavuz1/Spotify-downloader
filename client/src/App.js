@@ -16,6 +16,7 @@ import axios from "axios";
 import YouTubeIcon from "@mui/icons-material/YouTube";
 import AudioFileIcon from "@mui/icons-material/AudioFile";
 import VideoFileIcon from "@mui/icons-material/VideoFile";
+import "./styles/Banner.css";
 
 function App() {
   const [url, setUrl] = useState("");
@@ -184,49 +185,34 @@ function App() {
       setError(null);
       setDownloadStatus("Preparing playlist download...");
 
-      const response = await axios.post("/api/download-playlist", {
-        tracks,
-        playlistName,
+      const response = await axios({
+        url: "/api/download-playlist",
+        method: "POST",
+        data: {
+          tracks,
+          playlistName,
+        },
+        responseType: "blob",
+        headers: {
+          Accept: "application/zip",
+        },
       });
 
-      if (!response.data.tracks || response.data.tracks.length === 0) {
-        throw new Error("No tracks received from server");
+      if (response.data.size === 0) {
+        throw new Error("Received empty file");
       }
 
-      for (let i = 0; i < response.data.tracks.length; i++) {
-        const track = response.data.tracks[i];
-        setDownloadStatus(
-          `Downloading track ${i + 1} of ${response.data.tracks.length}`
-        );
+      const blob = new Blob([response.data], { type: "application/zip" });
+      const downloadUrl = window.URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = downloadUrl;
+      link.download = `${playlistName || "playlist"}.zip`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(downloadUrl);
 
-        const downloadResponse = await axios({
-          url: track.url,
-          method: "GET",
-          responseType: "blob",
-          headers: {
-            Accept: "audio/mpeg",
-          },
-        });
-
-        if (downloadResponse.data.size === 0) {
-          console.warn(`Empty file received for track: ${track.name}`);
-          continue;
-        }
-
-        const blob = new Blob([downloadResponse.data], { type: "audio/mpeg" });
-        const downloadUrl = window.URL.createObjectURL(blob);
-        const link = document.createElement("a");
-        link.href = downloadUrl;
-        link.download = `${track.name}.mp3`;
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-        window.URL.revokeObjectURL(downloadUrl);
-
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-      }
-
-      setDownloadStatus("All downloads completed!");
+      setDownloadStatus("Download complete!");
       setTimeout(() => setDownloadStatus(null), 3000);
     } catch (error) {
       console.error("Download error:", error);
@@ -238,181 +224,204 @@ function App() {
   };
 
   return (
-    <Container maxWidth="sm" sx={{ mt: 4 }}>
-      <Typography variant="h4" component="h1" gutterBottom align="center">
-        Spotify & YouTube Downloader
-      </Typography>
+    <div>
+      <div className="ad-banner banner-left">
+        <p>Place Your Ad Here</p>
+      </div>
 
-      <form onSubmit={handleSubmit}>
-        <Box sx={{ display: "flex", gap: 1, mb: 2 }}>
-          <TextField
-            fullWidth
-            label={isYouTube ? "YouTube URL" : "Spotify URL"}
-            variant="outlined"
-            value={url}
-            onChange={handleUrlChange}
-            disabled={loading}
-            InputProps={{
-              startAdornment: (
-                <InputAdornment position="start">
-                  {isYouTube ? (
-                    <YouTubeIcon color="error" />
-                  ) : (
-                    <YouTubeIcon color="disabled" />
-                  )}
-                </InputAdornment>
-              ),
-            }}
-            error={!!error}
-            helperText={error}
-          />
-          <Button
-            type="submit"
-            variant="contained"
-            disabled={loading}
-            sx={{ minWidth: "100px" }}
-          >
-            {loading ? <CircularProgress size={24} /> : "Search"}
-          </Button>
-        </Box>
-      </form>
+      <div className="ad-banner banner-right">
+        <p>Place Your Ad Here</p>
+      </div>
 
-      {downloadStatus && (
-        <Typography
-          variant="body2"
-          color="text.secondary"
-          align="center"
-          sx={{ mt: 2, mb: 2 }}
-        >
-          {downloadStatus}
-        </Typography>
-      )}
+      <div className="main-content">
+        <Container maxWidth="sm" sx={{ mt: 4 }}>
+          <Typography variant="h4" component="h1" gutterBottom align="center">
+            Spotify & YouTube Downloader
+          </Typography>
 
-      {videoInfo && (
-        <Card sx={{ mt: 2 }}>
-          <CardContent>
-            {videoInfo.thumbnail && (
-              <CardMedia
-                component="img"
-                height="300"
-                image={videoInfo.thumbnail}
-                alt={videoInfo.title}
-                sx={{ objectFit: "contain" }}
+          <form onSubmit={handleSubmit}>
+            <Box sx={{ display: "flex", gap: 1, mb: 2 }}>
+              <TextField
+                fullWidth
+                label={isYouTube ? "YouTube URL" : "Spotify URL"}
+                variant="outlined"
+                value={url}
+                onChange={handleUrlChange}
+                disabled={loading}
+                InputProps={{
+                  startAdornment: (
+                    <InputAdornment position="start">
+                      {isYouTube ? (
+                        <YouTubeIcon color="error" />
+                      ) : (
+                        <YouTubeIcon color="disabled" />
+                      )}
+                    </InputAdornment>
+                  ),
+                }}
+                error={!!error}
+                helperText={error}
               />
-            )}
-            <Typography variant="h6" component="div">
-              {videoInfo.title}
-            </Typography>
-            <Typography color="text.secondary">{videoInfo.author}</Typography>
-            <Box
-              sx={{ mt: 2, display: "flex", gap: 2, flexDirection: "column" }}
-            >
-              <Box sx={{ display: "flex", gap: 2, justifyContent: "center" }}>
-                <Button
-                  variant="contained"
-                  startIcon={<AudioFileIcon />}
-                  onClick={() => handleYouTubeDownload("audio")}
-                  disabled={loading || !url}
-                >
-                  Download MP3
-                </Button>
-                <Button
-                  variant="contained"
-                  startIcon={<VideoFileIcon />}
-                  onClick={() => handleYouTubeDownload("video")}
-                  disabled={loading || !url}
-                >
-                  Download Video
-                </Button>
-              </Box>
-              <Box sx={{ display: "flex", justifyContent: "center" }}>
-                <TextField
-                  select
-                  label="Video Quality"
-                  value={selectedResolution}
-                  onChange={(e) => setSelectedResolution(e.target.value)}
-                  disabled={loading}
-                  sx={{ width: "200px" }}
-                >
-                  {resolutionOptions.map((option) => (
-                    <MenuItem key={option.value} value={option.value}>
-                      {option.label}
-                    </MenuItem>
-                  ))}
-                </TextField>
-              </Box>
+              <Button
+                type="submit"
+                variant="contained"
+                disabled={loading}
+                sx={{ minWidth: "100px" }}
+              >
+                {loading ? <CircularProgress size={24} /> : "Search"}
+              </Button>
             </Box>
-          </CardContent>
-        </Card>
-      )}
+          </form>
 
-      {content && !isYouTube && (
-        <Card sx={{ mt: 2 }}>
-          <CardContent>
-            {content.type === "track" ? (
-              <>
-                {content.info.image && (
+          {downloadStatus && (
+            <Typography
+              variant="body2"
+              color="text.secondary"
+              align="center"
+              sx={{ mt: 2, mb: 2 }}
+            >
+              {downloadStatus}
+            </Typography>
+          )}
+
+          {videoInfo && (
+            <Card sx={{ mt: 2 }}>
+              <CardContent>
+                {videoInfo.thumbnail && (
                   <CardMedia
                     component="img"
                     height="300"
-                    image={content.info.image}
-                    alt={content.info.name}
+                    image={videoInfo.thumbnail}
+                    alt={videoInfo.title}
                     sx={{ objectFit: "contain" }}
                   />
                 )}
                 <Typography variant="h6" component="div">
-                  {content.info.name}
+                  {videoInfo.title}
                 </Typography>
                 <Typography color="text.secondary">
-                  {content.info.artist} - {content.info.album}
+                  {videoInfo.author}
                 </Typography>
-                <Button
-                  variant="contained"
-                  onClick={() => handleDownload(content.info)}
-                  sx={{ mt: 2 }}
-                  disabled={loading}
+                <Box
+                  sx={{
+                    mt: 2,
+                    display: "flex",
+                    gap: 2,
+                    flexDirection: "column",
+                  }}
                 >
-                  {loading ? "Downloading..." : "Download"}
-                </Button>
-              </>
-            ) : content.type === "playlist" ? (
-              <>
-                <Typography variant="h6" component="div" gutterBottom>
-                  {content.name}
-                </Typography>
-                <Button
-                  variant="contained"
-                  onClick={() => downloadPlaylist(content.tracks, content.name)}
-                  sx={{ mb: 2 }}
-                  disabled={loading}
-                >
-                  {loading ? "Downloading..." : "Download Entire Playlist"}
-                </Button>
-                {content.tracks.map((track, index) => (
-                  <Box key={track.id} sx={{ mb: 2 }}>
-                    <Typography variant="subtitle1">
-                      {index + 1}. {track.name}
+                  <Box
+                    sx={{ display: "flex", gap: 2, justifyContent: "center" }}
+                  >
+                    <Button
+                      variant="contained"
+                      startIcon={<AudioFileIcon />}
+                      onClick={() => handleYouTubeDownload("audio")}
+                      disabled={loading || !url}
+                    >
+                      Download MP3
+                    </Button>
+                    <Button
+                      variant="contained"
+                      startIcon={<VideoFileIcon />}
+                      onClick={() => handleYouTubeDownload("video")}
+                      disabled={loading || !url}
+                    >
+                      Download Video
+                    </Button>
+                  </Box>
+                  <Box sx={{ display: "flex", justifyContent: "center" }}>
+                    <TextField
+                      select
+                      label="Video Quality"
+                      value={selectedResolution}
+                      onChange={(e) => setSelectedResolution(e.target.value)}
+                      disabled={loading}
+                      sx={{ width: "200px" }}
+                    >
+                      {resolutionOptions.map((option) => (
+                        <MenuItem key={option.value} value={option.value}>
+                          {option.label}
+                        </MenuItem>
+                      ))}
+                    </TextField>
+                  </Box>
+                </Box>
+              </CardContent>
+            </Card>
+          )}
+
+          {content && !isYouTube && (
+            <Card sx={{ mt: 2 }}>
+              <CardContent>
+                {content.type === "track" ? (
+                  <>
+                    {content.info.image && (
+                      <CardMedia
+                        component="img"
+                        height="300"
+                        image={content.info.image}
+                        alt={content.info.name}
+                        sx={{ objectFit: "contain" }}
+                      />
+                    )}
+                    <Typography variant="h6" component="div">
+                      {content.info.name}
                     </Typography>
-                    <Typography color="text.secondary" variant="body2">
-                      {track.artist} - {track.album}
+                    <Typography color="text.secondary">
+                      {content.info.artist} - {content.info.album}
                     </Typography>
                     <Button
-                      variant="outlined"
-                      size="small"
-                      onClick={() => handleDownload(track)}
-                      sx={{ mt: 1 }}
+                      variant="contained"
+                      onClick={() => handleDownload(content.info)}
+                      sx={{ mt: 2 }}
                       disabled={loading}
                     >
                       {loading ? "Downloading..." : "Download"}
                     </Button>
-                  </Box>
-                ))}
-              </>
-            ) : null}
-          </CardContent>
-        </Card>
-      )}
-    </Container>
+                  </>
+                ) : content.type === "playlist" ? (
+                  <>
+                    <Typography variant="h6" component="div" gutterBottom>
+                      {content.name}
+                    </Typography>
+                    <Button
+                      variant="contained"
+                      onClick={() =>
+                        downloadPlaylist(content.tracks, content.name)
+                      }
+                      sx={{ mb: 2 }}
+                      disabled={loading}
+                    >
+                      {loading ? "Downloading..." : "Download Entire Playlist"}
+                    </Button>
+                    {content.tracks.map((track, index) => (
+                      <Box key={track.id} sx={{ mb: 2 }}>
+                        <Typography variant="subtitle1">
+                          {index + 1}. {track.name}
+                        </Typography>
+                        <Typography color="text.secondary" variant="body2">
+                          {track.artist} - {track.album}
+                        </Typography>
+                        <Button
+                          variant="outlined"
+                          size="small"
+                          onClick={() => handleDownload(track)}
+                          sx={{ mt: 1 }}
+                          disabled={loading}
+                        >
+                          {loading ? "Downloading..." : "Download"}
+                        </Button>
+                      </Box>
+                    ))}
+                  </>
+                ) : null}
+              </CardContent>
+            </Card>
+          )}
+        </Container>
+      </div>
+    </div>
   );
 }
 

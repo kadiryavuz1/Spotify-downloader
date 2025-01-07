@@ -61,6 +61,9 @@ app.use(
   })
 );
 
+// Serve static files from React build
+app.use(express.static(path.join(__dirname, "client/build")));
+
 // Initialize Spotify API client with environment variables
 const spotifyApi = new SpotifyWebApi({
   clientId: process.env.SPOTIFY_CLIENT_ID || "b0ad6d6cea8b4727a4d391ccc8f5c110",
@@ -209,21 +212,36 @@ app.post("/api/download", async (req, res) => {
     const { track_name, artist_name } = req.body;
     console.log("Starting download process for:", { track_name, artist_name });
 
-    const searchQuery = `${track_name} ${artist_name} audio`;
-    const searchResponse = await axios.get(
-      `https://www.youtube.com/results?search_query=${encodeURIComponent(
-        searchQuery
-      )}`
-    );
+    const searchQuery = `${track_name} ${artist_name}`;
 
-    const match = searchResponse.data.match(/videoId":"([^"]+)"/);
-    if (!match) {
-      console.log("No matching video found on YouTube");
-      throw new Error("No video found");
-    }
+    // Use yt-dlp to search
+    const videoUrl = await new Promise((resolve, reject) => {
+      const ytDlpSearch = spawn("yt-dlp", [
+        "ytsearch1:" + searchQuery,
+        "--get-id",
+        "--no-warnings",
+      ]);
 
-    const videoId = match[1];
-    const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
+      let videoId = "";
+      let error = "";
+
+      ytDlpSearch.stdout.on("data", (data) => {
+        videoId += data.toString().trim();
+      });
+
+      ytDlpSearch.stderr.on("data", (data) => {
+        error += data.toString();
+      });
+
+      ytDlpSearch.on("close", (code) => {
+        if (code === 0 && videoId) {
+          resolve(`https://www.youtube.com/watch?v=${videoId}`);
+        } else {
+          reject(new Error(`Search failed: ${error}`));
+        }
+      });
+    });
+
     console.log("Found video URL:", videoUrl);
 
     // Sanitize filename for filesystem
@@ -279,45 +297,24 @@ app.post("/api/download", async (req, res) => {
 
     console.log("Download completed successfully");
 
-    // Encode filename for Content-Disposition header
-    const encodedFilename = encodeURIComponent(track_name).replace(
-      /['()]/g,
-      escape
-    );
+    // Read the file into memory
+    const fileBuffer = await fs.promises.readFile(outputPath);
 
-    // Set headers with properly encoded filename
+    // Delete the file immediately after reading
+    await fs.promises.unlink(outputPath);
+    console.log("File deleted after reading into memory");
+
+    // Set headers
     res.set({
       "Content-Type": "audio/mpeg",
-      "Content-Length": stats.size,
-      "Content-Disposition": `attachment; filename*=UTF-8''${encodedFilename}.mp3`,
+      "Content-Length": fileBuffer.length,
+      "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(
+        track_name
+      )}.mp3`,
     });
 
-    // Stream the file
-    const fileStream = fs.createReadStream(outputPath);
-    fileStream.pipe(res);
-
-    fileStream.on("end", () => {
-      // Clean up the file after streaming
-      fs.unlink(outputPath, (err) => {
-        if (err) console.error("Error deleting file:", err);
-        else console.log("Temporary file deleted successfully");
-      });
-    });
-
-    // Handle client disconnect
-    req.on("close", () => {
-      if (ytDlp) {
-        console.log("Client disconnected, killing yt-dlp process");
-        ytDlp.kill("SIGKILL");
-      }
-      if (outputPath && fs.existsSync(outputPath)) {
-        console.log("Cleaning up partial download file");
-        fs.unlink(outputPath, (err) => {
-          if (err) console.error("Error deleting partial file:", err);
-          else console.log("Partial file deleted successfully");
-        });
-      }
-    });
+    // Send the file from memory
+    res.send(fileBuffer);
   } catch (err) {
     console.error("Download error:", err);
     if (ytDlp) ytDlp.kill("SIGKILL");
@@ -441,26 +438,43 @@ app.post("/api/download-playlist", async (req, res) => {
     // Create playlist directory
     await fs.promises.mkdir(playlistDir, { recursive: true });
 
-    // Process tracks sequentially to avoid overwhelming the system
+    // Process tracks sequentially
     const downloadedTracks = [];
     for (const [index, track] of tracks.entries()) {
       try {
         console.log(
           `Processing track ${index + 1}/${tracks.length}: ${track.name}`
         );
+        const searchQuery = `${track.name} ${track.artist}`;
 
-        const searchQuery = `${track.name} ${track.artist} audio`;
-        const searchResponse = await axios.get(
-          `https://www.youtube.com/results?search_query=${encodeURIComponent(
-            searchQuery
-          )}`
-        );
+        // Use yt-dlp to search
+        const videoUrl = await new Promise((resolve, reject) => {
+          const ytDlpSearch = spawn("yt-dlp", [
+            "ytsearch1:" + searchQuery,
+            "--get-id",
+            "--no-warnings",
+          ]);
 
-        const match = searchResponse.data.match(/videoId":"([^"]+)"/);
-        if (!match) continue;
+          let videoId = "";
+          let error = "";
 
-        const videoId = match[1];
-        const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
+          ytDlpSearch.stdout.on("data", (data) => {
+            videoId += data.toString().trim();
+          });
+
+          ytDlpSearch.stderr.on("data", (data) => {
+            error += data.toString();
+          });
+
+          ytDlpSearch.on("close", (code) => {
+            if (code === 0 && videoId) {
+              resolve(`https://www.youtube.com/watch?v=${videoId}`);
+            } else {
+              reject(new Error(`Search failed: ${error}`));
+            }
+          });
+        });
+
         const sanitizedName = track.name.replace(/[^a-zA-Z0-9]/g, "_");
         const outputPath = path.join(
           playlistDir,
@@ -477,13 +491,16 @@ app.post("/api/download-playlist", async (req, res) => {
             "mp3",
             "--audio-quality",
             "0",
-            "--no-progress", // Remove progress output
             "-o",
             outputPath,
             videoUrl,
           ]);
 
           let error = "";
+
+          ytDlp.stdout.on("data", (data) => {
+            console.log(`yt-dlp output: ${data}`);
+          });
 
           ytDlp.stderr.on("data", (data) => {
             error += data.toString();
@@ -506,50 +523,59 @@ app.post("/api/download-playlist", async (req, res) => {
       }
     }
 
-    // Create download endpoints for successful downloads
-    downloadedTracks.forEach((track, index) => {
-      const endpoint = `/api/download-playlist/${progressId}/track/${index}`;
-      app.get(endpoint, (req, res) => {
-        const stats = fs.statSync(track.path);
-        const encodedFilename = encodeURIComponent(track.name).replace(
-          /['()]/g,
-          escape
-        );
+    if (downloadedTracks.length === 0) {
+      throw new Error("No tracks were downloaded successfully");
+    }
 
-        res.set({
-          "Content-Type": "audio/mpeg",
-          "Content-Length": stats.size,
-          "Content-Disposition": `attachment; filename*=UTF-8''${encodedFilename}.mp3`,
-        });
-
-        fs.createReadStream(track.path).pipe(res);
-      });
+    // Create a zip file containing all tracks
+    const zipPath = path.join(playlistDir, "playlist.zip");
+    const output = fs.createWriteStream(zipPath);
+    const archive = archiver("zip", {
+      zlib: { level: 9 }, // Maximum compression
     });
 
-    // Send download URLs to client
-    res.json({
-      tracks: downloadedTracks.map((track, index) => ({
-        name: track.name,
-        url: `/api/download-playlist/${progressId}/track/${index}`,
-      })),
-    });
+    await new Promise((resolve, reject) => {
+      output.on("close", resolve);
+      archive.on("error", reject);
+      archive.pipe(output);
 
-    // Clean up after 5 minutes
-    setTimeout(async () => {
-      try {
-        await fs.promises.rm(playlistDir, { recursive: true, force: true });
-        console.log("Cleanup completed successfully");
-      } catch (err) {
-        console.error("Error during cleanup:", err);
+      // Add each track to the zip
+      for (const track of downloadedTracks) {
+        archive.file(track.path, { name: `${track.name}.mp3` });
       }
-    }, 300000);
+
+      archive.finalize();
+    });
+
+    // Wait for the archive to finish writing
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+
+    // Read the zip file into memory
+    const fileBuffer = await fs.promises.readFile(zipPath);
+
+    // Clean up all files
+    await fs.promises.rm(playlistDir, { recursive: true, force: true });
+
+    // Set headers for zip download
+    res.set({
+      "Content-Type": "application/zip",
+      "Content-Length": fileBuffer.length,
+      "Content-Disposition": `attachment; filename="${
+        playlistName || "playlist"
+      }.zip"`,
+    });
+
+    // Send the zip file
+    res.send(fileBuffer);
   } catch (err) {
     console.error("Playlist download error:", err);
     // Clean up on error
     if (fs.existsSync(playlistDir)) {
       await fs.promises.rm(playlistDir, { recursive: true, force: true });
     }
-    res.status(500).json({ error: err.message });
+    if (!res.headersSent) {
+      res.status(500).json({ error: err.message });
+    }
   }
 });
 
@@ -697,39 +723,23 @@ app.post("/api/youtube-download", async (req, res) => {
 
     console.log("Download completed successfully");
 
-    // Then stream it to the client
+    // Read the file into memory
+    const fileBuffer = await fs.promises.readFile(outputPath);
+
+    // Delete the file immediately after reading
+    await fs.promises.unlink(outputPath);
+    console.log("File deleted after reading into memory");
+
+    // Set headers
     const contentType = format === "audio" ? "audio/mpeg" : "video/mp4";
-    res.writeHead(200, {
+    res.set({
       "Content-Type": contentType,
+      "Content-Length": fileBuffer.length,
       "Content-Disposition": `attachment; filename="youtube-download.${extension}"`,
-      "Content-Length": stats.size,
     });
 
-    const fileStream = fs.createReadStream(outputPath);
-    fileStream.pipe(res);
-
-    fileStream.on("end", () => {
-      // Clean up the file after streaming
-      fs.unlink(outputPath, (err) => {
-        if (err) console.error("Error deleting file:", err);
-        else console.log("Temporary file deleted successfully");
-      });
-    });
-
-    // Handle client disconnect
-    req.on("close", () => {
-      if (ytDlp) {
-        console.log("Client disconnected, killing yt-dlp process");
-        ytDlp.kill("SIGKILL");
-      }
-      if (outputPath && fs.existsSync(outputPath)) {
-        console.log("Cleaning up partial download file");
-        fs.unlink(outputPath, (err) => {
-          if (err) console.error("Error deleting partial file:", err);
-          else console.log("Partial file deleted successfully");
-        });
-      }
-    });
+    // Send the file from memory
+    res.send(fileBuffer);
   } catch (err) {
     console.error("Download error:", err);
     if (ytDlp) ytDlp.kill("SIGKILL");
@@ -752,6 +762,10 @@ if (process.env.NODE_ENV === "production") {
     res.sendFile(path.join(__dirname, "client/build", "index.html"));
   });
 }
+
+app.get("*", (req, res) => {
+  res.sendFile(path.join(__dirname, "client/build", "index.html"));
+});
 
 const PORT = process.env.PORT || 3000;
 (async () => {
