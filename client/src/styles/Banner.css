@@ -2,11 +2,12 @@
   position: fixed;
   top: 0;
   width: 160px;
-  height: 600px;
+  height: 650px;
   background-color: transparent;
   display: flex;
+  flex-direction: column;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
   text-align: center;
   padding: 10px;
   color: #666;
@@ -61,5 +62,10 @@
 
   .ad-banner:hover img {
     filter: brightness(1);
+  }
+
+  .ad-banner .MuiTypography-caption {
+    background-color: rgba(0, 0, 0, 0.8) !important;
+    color: #fff !important;
   }
 }
