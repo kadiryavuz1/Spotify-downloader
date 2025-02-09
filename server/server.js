@@ -15,6 +15,51 @@ const {
 } = require("worker_threads");
 const os = require("os");
 
+// Add after the requires
+const proxyList = [];
+let lastProxyUpdate = 0;
+const PROXY_UPDATE_INTERVAL = 30 * 60 * 1000; // 30 minutes
+
+async function updateProxyList() {
+  try {
+    console.log("Updating proxy list...");
+    const response = await axios.get(
+      "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt"
+    );
+    const newProxies = response.data.split("\n").filter((line) => line.trim());
+
+    // Clear the existing proxy list
+    proxyList.length = 0;
+
+    // Add new proxies
+    proxyList.push(...newProxies);
+    lastProxyUpdate = Date.now();
+
+    console.log(`Updated proxy list with ${proxyList.length} proxies`);
+  } catch (error) {
+    console.error("Failed to update proxy list:", error);
+  }
+}
+
+// Function to get a working proxy
+async function getWorkingProxy() {
+  // Update proxy list if it's been more than 30 minutes
+  if (Date.now() - lastProxyUpdate > PROXY_UPDATE_INTERVAL) {
+    await updateProxyList();
+  }
+
+  // If no proxies available, try updating
+  if (proxyList.length === 0) {
+    await updateProxyList();
+  }
+
+  // Get a random proxy
+  const randomIndex = Math.floor(Math.random() * proxyList.length);
+  const proxy = proxyList[randomIndex];
+
+  return proxy ? `http://${proxy}` : null;
+}
+
 // Function to check if a command exists
 function commandExists(command) {
   try {
@@ -70,7 +115,14 @@ app.use(
 );
 
 // Serve static files from React build
-app.use(express.static(path.join(__dirname, "../client/build")));
+if (process.env.NODE_ENV === "production") {
+  app.use(express.static(path.join(__dirname, "../client/build")));
+
+  // Handle React routing, return all requests to React app
+  app.get("*", function (req, res) {
+    res.sendFile(path.join(__dirname, "../client/build", "index.html"));
+  });
+}
 
 // Initialize Spotify API client with environment variables
 const spotifyApi = new SpotifyWebApi({
@@ -295,126 +347,205 @@ app.post("/api/info", async (req, res) => {
   }
 });
 
+// Add proxy configuration
+const PROXY_LIST = process.env.PROXY_LIST
+  ? process.env.PROXY_LIST.split(",")
+  : [];
+let currentProxyIndex = 0;
+
+function getNextProxy() {
+  if (PROXY_LIST.length === 0) return null;
+  currentProxyIndex = (currentProxyIndex + 1) % PROXY_LIST.length;
+  return PROXY_LIST[currentProxyIndex];
+}
+
+// Update the getYtDlpArgs function
+const getYtDlpArgs = async (format, resolution = null) => {
+  const proxy = await getWorkingProxy();
+  const baseArgs = [
+    "--format",
+    format === "audio"
+      ? "bestaudio/best"
+      : `bestvideo[height<=${resolution}]+bestaudio/best[height<=${resolution}]/best`,
+    "--extract-audio",
+    "--audio-format",
+    "mp3",
+    "--audio-quality",
+    "0",
+    "--no-check-certificate",
+    "--user-agent",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "--referer",
+    "https://www.youtube.com/",
+    "--add-header",
+    "Accept-Language:en-US,en;q=0.9",
+    "--add-header",
+    "Accept:text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "--add-header",
+    "Accept-Encoding:gzip, deflate, br",
+    "--add-header",
+    "DNT:1",
+    "--add-header",
+    "Upgrade-Insecure-Requests:1",
+    "--sleep-interval",
+    "5",
+    "--max-sleep-interval",
+    "10",
+    "--geo-bypass",
+    "--no-playlist",
+    "--ignore-errors",
+    "--no-warnings",
+    "--cookies-from-browser",
+    "chrome",
+    "--extractor-args",
+    "youtube:player_client=android",
+    "--quiet",
+  ];
+
+  if (proxy) {
+    console.log("Using proxy:", proxy);
+    baseArgs.push("--proxy", proxy);
+  }
+
+  return baseArgs;
+};
+
+// Update the download function
 app.post("/api/download", async (req, res) => {
   let ytDlp = null;
   let outputPath = null;
+  let retryCount = 0;
+  const MAX_RETRIES = 5; // Increased retries for free proxies
+
+  const downloadWithRetry = async () => {
+    try {
+      const { track_name, artist_name } = req.body;
+      console.log("Starting download process for:", {
+        track_name,
+        artist_name,
+      });
+
+      const searchQuery = `${track_name} ${artist_name}`;
+      const ytDlpArgs = await getYtDlpArgs("audio");
+
+      const videoUrl = await new Promise((resolve, reject) => {
+        const ytDlpSearch = spawn("yt-dlp", [
+          ...ytDlpArgs,
+          "ytsearch1:" + searchQuery,
+          "--get-id",
+        ]);
+
+        let videoId = "";
+        let error = "";
+
+        ytDlpSearch.stdout.on("data", (data) => {
+          videoId += data.toString().trim();
+        });
+
+        ytDlpSearch.stderr.on("data", (data) => {
+          error += data.toString();
+        });
+
+        ytDlpSearch.on("close", (code) => {
+          if (code === 0 && videoId) {
+            resolve(`https://www.youtube.com/watch?v=${videoId}`);
+          } else {
+            reject(new Error(`Search failed: ${error}`));
+          }
+        });
+      });
+
+      // Sanitize filename for filesystem
+      const sanitizedName = track_name.replace(/[^a-zA-Z0-9]/g, "_");
+      const filename = `${sanitizedName}-${Date.now()}.mp3`;
+      outputPath = path.join(downloadsDir, filename);
+      console.log("Preparing to download to:", outputPath);
+
+      // Download the file completely before sending
+      await new Promise((resolve, reject) => {
+        ytDlp = spawn("yt-dlp", [
+          "-f",
+          "bestaudio",
+          "-x",
+          "--audio-format",
+          "mp3",
+          "--audio-quality",
+          "0",
+          "-o",
+          outputPath,
+          videoUrl,
+        ]);
+
+        let error = "";
+
+        ytDlp.stdout.on("data", (data) => {
+          console.log(`yt-dlp output: ${data}`);
+        });
+
+        ytDlp.stderr.on("data", (data) => {
+          console.error(`yt-dlp error: ${data}`);
+          error += data.toString();
+        });
+
+        ytDlp.on("close", (code) => {
+          if (code === 0) {
+            resolve();
+          } else {
+            reject(new Error(`Download failed with code ${code}: ${error}`));
+          }
+        });
+      });
+
+      // Check if file exists and has size
+      if (!fs.existsSync(outputPath)) {
+        throw new Error("Download failed - file not created");
+      }
+
+      const stats = fs.statSync(outputPath);
+      if (stats.size === 0) {
+        throw new Error("Download failed - file is empty");
+      }
+
+      console.log("Download completed successfully");
+
+      // Read the file into memory
+      const fileBuffer = await fs.promises.readFile(outputPath);
+
+      // Delete the file immediately after reading
+      await fs.promises.unlink(outputPath);
+      console.log("File deleted after reading into memory");
+
+      // Set headers
+      res.set({
+        "Content-Type": "audio/mpeg",
+        "Content-Length": fileBuffer.length,
+        "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(
+          track_name
+        )}.mp3`,
+      });
+
+      // Send the file from memory
+      res.send(fileBuffer);
+    } catch (err) {
+      console.error(`Download attempt ${retryCount + 1} failed:`, err);
+      if (retryCount < MAX_RETRIES && err.message.includes("HTTP Error 429")) {
+        retryCount++;
+        console.log(`Retrying download (attempt ${retryCount + 1})...`);
+        // Wait before retrying (exponential backoff)
+        await new Promise((resolve) =>
+          setTimeout(resolve, Math.pow(2, retryCount) * 1000)
+        );
+        return downloadWithRetry();
+      }
+      throw err;
+    }
+  };
 
   try {
-    const { track_name, artist_name } = req.body;
-    console.log("Starting download process for:", { track_name, artist_name });
-
-    const searchQuery = `${track_name} ${artist_name}`;
-
-    // Use yt-dlp to search
-    const videoUrl = await new Promise((resolve, reject) => {
-      const ytDlpSearch = spawn("yt-dlp", [
-        "ytsearch1:" + searchQuery,
-        "--get-id",
-        "--no-warnings",
-      ]);
-
-      let videoId = "";
-      let error = "";
-
-      ytDlpSearch.stdout.on("data", (data) => {
-        videoId += data.toString().trim();
-      });
-
-      ytDlpSearch.stderr.on("data", (data) => {
-        error += data.toString();
-      });
-
-      ytDlpSearch.on("close", (code) => {
-        if (code === 0 && videoId) {
-          resolve(`https://www.youtube.com/watch?v=${videoId}`);
-        } else {
-          reject(new Error(`Search failed: ${error}`));
-        }
-      });
-    });
-
-    console.log("Found video URL:", videoUrl);
-
-    // Sanitize filename for filesystem
-    const sanitizedName = track_name.replace(/[^a-zA-Z0-9]/g, "_");
-    const filename = `${sanitizedName}-${Date.now()}.mp3`;
-    outputPath = path.join(downloadsDir, filename);
-    console.log("Preparing to download to:", outputPath);
-
-    // Download the file completely before sending
-    await new Promise((resolve, reject) => {
-      ytDlp = spawn("yt-dlp", [
-        "-f",
-        "bestaudio",
-        "-x",
-        "--audio-format",
-        "mp3",
-        "--audio-quality",
-        "0",
-        "-o",
-        outputPath,
-        videoUrl,
-      ]);
-
-      let error = "";
-
-      ytDlp.stdout.on("data", (data) => {
-        console.log(`yt-dlp output: ${data}`);
-      });
-
-      ytDlp.stderr.on("data", (data) => {
-        console.error(`yt-dlp error: ${data}`);
-        error += data.toString();
-      });
-
-      ytDlp.on("close", (code) => {
-        if (code === 0) {
-          resolve();
-        } else {
-          reject(new Error(`Download failed with code ${code}: ${error}`));
-        }
-      });
-    });
-
-    // Check if file exists and has size
-    if (!fs.existsSync(outputPath)) {
-      throw new Error("Download failed - file not created");
-    }
-
-    const stats = fs.statSync(outputPath);
-    if (stats.size === 0) {
-      throw new Error("Download failed - file is empty");
-    }
-
-    console.log("Download completed successfully");
-
-    // Read the file into memory
-    const fileBuffer = await fs.promises.readFile(outputPath);
-
-    // Delete the file immediately after reading
-    await fs.promises.unlink(outputPath);
-    console.log("File deleted after reading into memory");
-
-    // Set headers
-    res.set({
-      "Content-Type": "audio/mpeg",
-      "Content-Length": fileBuffer.length,
-      "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(
-        track_name
-      )}.mp3`,
-    });
-
-    // Send the file from memory
-    res.send(fileBuffer);
+    await downloadWithRetry();
   } catch (err) {
-    console.error("Download error:", err);
-    if (ytDlp) ytDlp.kill("SIGKILL");
-    if (outputPath && fs.existsSync(outputPath)) {
-      fs.unlinkSync(outputPath);
-    }
-    if (!res.headersSent) {
-      res.status(500).json({ error: err.message });
-    }
+    console.error("All download attempts failed:", err);
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -859,131 +990,113 @@ app.post("/api/youtube-info", async (req, res) => {
 app.post("/api/youtube-download", async (req, res) => {
   let ytDlp = null;
   let outputPath = null;
+  let retryCount = 0;
+  const MAX_RETRIES = 5;
 
-  try {
-    const { url, format, resolution } = req.body;
-    const videoId = extractYoutubeId(url);
-    if (!videoId) return res.status(400).json({ error: "Invalid YouTube URL" });
+  const downloadWithRetry = async () => {
+    try {
+      const { url, format, resolution } = req.body;
+      const videoId = extractYoutubeId(url);
+      if (!videoId)
+        return res.status(400).json({ error: "Invalid YouTube URL" });
 
-    const timestamp = Date.now();
-    const extension = format === "audio" ? "mp3" : "mp4";
-    const filename = `youtube-${timestamp}.${extension}`;
-    outputPath = path.join(downloadsDir, filename);
+      const timestamp = Date.now();
+      const extension = format === "audio" ? "mp3" : "mp4";
+      const filename = `youtube-${timestamp}.${extension}`;
+      outputPath = path.join(downloadsDir, filename);
 
-    // Updated arguments for better video quality and format selection
-    const ytDlpArgs =
-      format === "audio"
-        ? [
-            "--format",
-            "bestaudio/best",
-            "--extract-audio",
-            "--audio-format",
-            "mp3",
-            "--audio-quality",
-            "0",
-            "--no-check-certificate",
-            "--user-agent",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "--referer",
-            "https://www.youtube.com/",
-            "--add-header",
-            "Accept-Language:en-US,en;q=0.9",
-            "--geo-bypass",
-            "--no-playlist",
-            "--ignore-errors",
-            "--no-warnings",
-            "--extractor-args",
-            "youtube:player_client=android",
-            "--quiet",
-          ]
-        : [
-            "--format",
-            `bestvideo[height<=${resolution}]+bestaudio/best[height<=${resolution}]/best`,
-            "--merge-output-format",
-            "mp4",
-            "--no-check-certificate",
-            "--user-agent",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "--referer",
-            "https://www.youtube.com/",
-            "--add-header",
-            "Accept-Language:en-US,en;q=0.9",
-            "--geo-bypass",
-            "--no-playlist",
-            "--ignore-errors",
-            "--no-warnings",
-            "--extractor-args",
-            "youtube:player_client=android",
-            "--quiet",
-          ];
+      // Get args with proxy
+      const ytDlpArgs = await getYtDlpArgs(format, resolution);
 
-    console.log("Starting download with args:", [
-      ...ytDlpArgs,
-      "-o",
-      outputPath,
-      `https://www.youtube.com/watch?v=${videoId}`,
-    ]);
-
-    // Download with additional headers and options
-    await new Promise((resolve, reject) => {
-      ytDlp = spawn("yt-dlp", [
+      console.log("Starting download with args:", [
         ...ytDlpArgs,
         "-o",
         outputPath,
         `https://www.youtube.com/watch?v=${videoId}`,
       ]);
 
-      let error = "";
+      // Download with proxy
+      await new Promise((resolve, reject) => {
+        ytDlp = spawn("yt-dlp", [
+          ...ytDlpArgs,
+          "-o",
+          outputPath,
+          `https://www.youtube.com/watch?v=${videoId}`,
+        ]);
 
-      ytDlp.stdout.on("data", (data) => {
-        console.log(`yt-dlp output: ${data}`);
+        let error = "";
+
+        ytDlp.stdout.on("data", (data) => {
+          console.log(`yt-dlp output: ${data}`);
+        });
+
+        ytDlp.stderr.on("data", (data) => {
+          console.error(`yt-dlp error: ${data}`);
+          error += data.toString();
+        });
+
+        ytDlp.on("close", (code) => {
+          if (code === 0) {
+            resolve();
+          } else {
+            reject(new Error(`Download failed with code ${code}: ${error}`));
+          }
+        });
       });
 
-      ytDlp.stderr.on("data", (data) => {
-        console.error(`yt-dlp error: ${data}`);
-        error += data.toString();
+      // Check if file exists and has size
+      if (!fs.existsSync(outputPath)) {
+        throw new Error("Download failed - file not created");
+      }
+
+      const stats = fs.statSync(outputPath);
+      if (stats.size === 0) {
+        throw new Error("Download failed - file is empty");
+      }
+
+      console.log("Download completed successfully");
+
+      // Read the file into memory
+      const fileBuffer = await fs.promises.readFile(outputPath);
+
+      // Delete the file immediately after reading
+      await fs.promises.unlink(outputPath);
+      console.log("File deleted after reading into memory");
+
+      // Set headers
+      const contentType = format === "audio" ? "audio/mpeg" : "video/mp4";
+      res.set({
+        "Content-Type": contentType,
+        "Content-Length": fileBuffer.length,
+        "Content-Disposition": `attachment; filename="youtube-download.${extension}"`,
       });
 
-      ytDlp.on("close", (code) => {
-        if (code === 0) {
-          resolve();
-        } else {
-          reject(new Error(`Download failed with code ${code}: ${error}`));
-        }
-      });
-    });
-
-    // Check if file exists and has size
-    if (!fs.existsSync(outputPath)) {
-      throw new Error("Download failed - file not created");
+      // Send the file from memory
+      res.send(fileBuffer);
+    } catch (err) {
+      console.error(`Download attempt ${retryCount + 1} failed:`, err);
+      if (
+        retryCount < MAX_RETRIES &&
+        (err.message.includes("HTTP Error 429") ||
+          err.message.includes("Unable to download") ||
+          err.message.includes("Proxy error"))
+      ) {
+        retryCount++;
+        console.log(`Retrying download (attempt ${retryCount + 1})...`);
+        // Wait before retrying (exponential backoff)
+        await new Promise((resolve) =>
+          setTimeout(resolve, Math.pow(2, retryCount) * 1000)
+        );
+        return downloadWithRetry();
+      }
+      throw err;
     }
+  };
 
-    const stats = fs.statSync(outputPath);
-    if (stats.size === 0) {
-      throw new Error("Download failed - file is empty");
-    }
-
-    console.log("Download completed successfully");
-
-    // Read the file into memory
-    const fileBuffer = await fs.promises.readFile(outputPath);
-
-    // Delete the file immediately after reading
-    await fs.promises.unlink(outputPath);
-    console.log("File deleted after reading into memory");
-
-    // Set headers
-    const contentType = format === "audio" ? "audio/mpeg" : "video/mp4";
-    res.set({
-      "Content-Type": contentType,
-      "Content-Length": fileBuffer.length,
-      "Content-Disposition": `attachment; filename="youtube-download.${extension}"`,
-    });
-
-    // Send the file from memory
-    res.send(fileBuffer);
+  try {
+    await downloadWithRetry();
   } catch (err) {
-    console.error("Download error:", err);
+    console.error("All download attempts failed:", err);
     if (ytDlp) ytDlp.kill("SIGKILL");
     if (outputPath && fs.existsSync(outputPath)) {
       fs.unlinkSync(outputPath);
@@ -994,17 +1107,27 @@ app.post("/api/youtube-download", async (req, res) => {
   }
 });
 
-// Handle React routing, return all requests to React app
-app.get("*", function (req, res) {
-  res.sendFile(path.join(__dirname, "../client/build", "index.html"));
+// Add error handling for cloud environments
+process.on("uncaughtException", (err) => {
+  console.error("Uncaught Exception:", err);
+  // Implement your error reporting service here
 });
 
+process.on("unhandledRejection", (err) => {
+  console.error("Unhandled Rejection:", err);
+  // Implement your error reporting service here
+});
+
+// Update the port configuration
 const PORT = process.env.PORT || 3000;
+const HOST = process.env.HOST || "0.0.0.0"; // Allow external connections
+
 (async () => {
   try {
     await installPrerequisites();
-    app.listen(PORT, () => {
-      console.log(`Server running on port ${PORT}`);
+    app.listen(PORT, HOST, () => {
+      console.log(`Server running on ${HOST}:${PORT}`);
+      console.log("Node environment:", process.env.NODE_ENV);
     });
   } catch (error) {
     console.error("Failed to start server:", error);

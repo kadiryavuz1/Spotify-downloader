@@ -6,10 +6,16 @@
     "install": "cd server && npm install && cd ../client && npm install",
     "client": "cd client && npm start",
     "server": "cd server && npm start",
-    "dev": "concurrently \"npm run server\" \"npm run client\""
+    "dev": "concurrently \"npm run server\" \"npm run client\"",
+    "build": "cd client && npm run build",
+    "start": "cd server && npm start",
+    "heroku-postbuild": "npm run install && npm run build"
   },
   "devDependencies": {
     "concurrently": "^8.2.2"
+  },
+  "engines": {
+    "node": ">=14.0.0"
   },
   "author": "",
   "license": "MIT"
