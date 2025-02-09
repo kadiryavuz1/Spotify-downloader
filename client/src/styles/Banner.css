@@ -1,10 +1,9 @@
 .ad-banner {
   position: fixed;
   top: 0;
-  width: 320px;
+  width: 160px;
   height: 600px;
-  background-color: #f5f5f5;
-  border: 1px dashed #ccc;
+  background-color: transparent;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -12,6 +11,18 @@
   padding: 10px;
   color: #666;
   z-index: 1000;
+  transition: opacity 0.3s ease, transform 0.3s ease;
+  opacity: 0;
+  transform: translateY(-20px);
+}
+
+.ad-banner.loaded {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.ad-banner:hover {
+  opacity: 0.9;
 }
 
 .banner-left {
@@ -23,16 +34,32 @@
 }
 
 .main-content {
-  margin: 0 330px;
+  margin: 0 180px;
+  min-height: 100vh;
+  padding: 20px;
+  transition: margin 0.3s ease;
 }
 
 /* Make banners responsive */
-@media (max-width: 1500px) {
+@media (max-width: 1200px) {
   .ad-banner {
-    display: none;
+    display: none !important;
+    opacity: 0;
   }
 
   .main-content {
     margin: 0;
+  }
+}
+
+/* Dark mode support */
+@media (prefers-color-scheme: dark) {
+  .ad-banner img {
+    filter: brightness(0.9);
+    transition: filter 0.3s ease;
+  }
+
+  .ad-banner:hover img {
+    filter: brightness(1);
   }
 }

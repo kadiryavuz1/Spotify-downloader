@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import {
   Container,
   TextField,
@@ -17,6 +17,9 @@ import YouTubeIcon from "@mui/icons-material/YouTube";
 import AudioFileIcon from "@mui/icons-material/AudioFile";
 import VideoFileIcon from "@mui/icons-material/VideoFile";
 import "./styles/Banner.css";
+import DownloadProgress from "./components/DownloadProgress";
+import AdBanner from "./components/AdBanner";
+import { adsConfig } from "./config/ads";
 
 function App() {
   const [url, setUrl] = useState("");
@@ -27,6 +30,8 @@ function App() {
   const [isYouTube, setIsYouTube] = useState(false);
   const [videoInfo, setVideoInfo] = useState(null);
   const [selectedResolution, setSelectedResolution] = useState("720p");
+  const [downloadProgress, setDownloadProgress] = useState(null);
+  const [adsLoaded, setAdsLoaded] = useState(false);
 
   const resolutionOptions = [
     { label: "360p", value: "360" },
@@ -180,64 +185,200 @@ function App() {
   };
 
   const downloadPlaylist = async (tracks, playlistName) => {
+    let eventSource = null;
+    const progressId = Date.now().toString();
+
+    // Reset progress state
+    setDownloadProgress(null);
+    setDownloadStatus(null);
+    setError(null);
+
+    // Add cleanup function for window unload
+    const handleUnload = async () => {
+      if (eventSource) {
+        eventSource.close();
+        try {
+          await axios.post(`/api/download-playlist/${progressId}/abort`);
+        } catch (error) {
+          console.error("Error aborting download:", error);
+        }
+      }
+    };
+
+    // Add event listeners for window unload
+    window.addEventListener("beforeunload", handleUnload);
+    window.addEventListener("unload", handleUnload);
+
     try {
       setLoading(true);
-      setError(null);
       setDownloadStatus("Preparing playlist download...");
 
+      // Create EventSource with the correct URL
+      const baseUrl =
+        process.env.NODE_ENV === "production"
+          ? process.env.REACT_APP_API_URL
+          : "http://localhost:3000";
+
+      eventSource = new EventSource(
+        `${baseUrl}/api/download-progress/${progressId}`,
+        {
+          withCredentials: true,
+        }
+      );
+
+      // Handle connection open
+      eventSource.onopen = () => {
+        console.log("EventSource connection established");
+      };
+
+      // Handle messages
+      eventSource.onmessage = (event) => {
+        try {
+          console.log("Raw event data:", event.data);
+          const data = JSON.parse(event.data);
+          console.log("Parsed progress data:", data);
+
+          if (data.status === "connected") {
+            console.log("Initial connection established");
+            return;
+          }
+
+          // Update progress state
+          console.log("Setting download progress:", data);
+          setDownloadProgress(data);
+
+          // Update status message based on current state
+          if (data.status === "downloading" || data.status === "extracting") {
+            const trackInfo = data.currentTrack;
+            if (trackInfo) {
+              console.log("Track info:", trackInfo);
+              setDownloadStatus(
+                `${
+                  data.status === "downloading" ? "Downloading" : "Processing"
+                }: ${trackInfo.name || "..."} (${trackInfo.currentTrack}/${
+                  trackInfo.totalTracks
+                })`
+              );
+            }
+          } else if (data.status === "creating_zip") {
+            setDownloadStatus("Creating zip file...");
+          } else if (data.status === "complete") {
+            setDownloadStatus("Download complete!");
+            eventSource.close();
+            setTimeout(() => {
+              setDownloadStatus(null);
+              setDownloadProgress(null);
+            }, 3000);
+          } else if (data.status === "error") {
+            setError(data.error || "Download failed");
+            setDownloadStatus("Download failed");
+            eventSource.close();
+          }
+        } catch (error) {
+          console.error("Error parsing progress data:", error, event.data);
+          setError("Error processing progress update");
+        }
+      };
+
+      // Handle errors
+      eventSource.onerror = (error) => {
+        console.error("EventSource error:", error);
+        setError("Connection error occurred");
+        setDownloadStatus("Download failed");
+        eventSource.close();
+      };
+
+      // Make the download request
       const response = await axios({
-        url: "/api/download-playlist",
+        url: `${baseUrl}/api/download-playlist`,
         method: "POST",
         data: {
           tracks,
           playlistName,
+          progressId,
         },
         responseType: "blob",
         headers: {
           Accept: "application/zip",
         },
+        withCredentials: true,
       });
 
       if (response.data.size === 0) {
         throw new Error("Received empty file");
       }
 
+      // Handle successful download
       const blob = new Blob([response.data], { type: "application/zip" });
       const downloadUrl = window.URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = downloadUrl;
-      link.download = `${playlistName || "playlist"}.zip`;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
+      triggerDownload(downloadUrl, `${playlistName || "playlist"}.zip`);
       window.URL.revokeObjectURL(downloadUrl);
-
-      setDownloadStatus("Download complete!");
-      setTimeout(() => setDownloadStatus(null), 3000);
     } catch (error) {
       console.error("Download error:", error);
       setError(error.response?.data?.error || "Download failed");
       setDownloadStatus("Download failed");
     } finally {
       setLoading(false);
+      // Clean up event listeners
+      window.removeEventListener("beforeunload", handleUnload);
+      window.removeEventListener("unload", handleUnload);
+      // Ensure EventSource is closed
+      if (eventSource) {
+        console.log("Closing EventSource in finally block");
+        eventSource.close();
+      }
     }
   };
 
+  useEffect(() => {
+    const cleanup = () => {
+      // Clean up any ad-related resources
+      Object.values(adsConfig).forEach((ad) => {
+        if (ad.image && ad.image.startsWith("http")) {
+          // Remove image from browser cache if needed
+          const img = new Image();
+          img.src = ad.image;
+          img.onload = () => URL.revokeObjectURL(img.src);
+        }
+      });
+    };
+
+    // Set ads as loaded
+    setAdsLoaded(true);
+
+    // Return cleanup function
+    return () => {
+      cleanup();
+      setAdsLoaded(false);
+    };
+  }, []);
+
   return (
     <div>
-      <div className="ad-banner banner-left">
-        <p>Place Your Ad Here</p>
-      </div>
-
-      <div className="ad-banner banner-right">
-        <p>Place Your Ad Here</p>
-      </div>
+      {adsLoaded && (
+        <>
+          <AdBanner position="left" adContent={adsConfig.left} />
+          <AdBanner position="right" adContent={adsConfig.right} />
+        </>
+      )}
 
       <div className="main-content">
         <Container maxWidth="sm" sx={{ mt: 4 }}>
           <Typography variant="h4" component="h1" gutterBottom align="center">
             Spotify & YouTube Downloader
           </Typography>
+
+          {downloadProgress && (
+            <Box sx={{ mb: 3 }}>
+              <DownloadProgress
+                status={downloadProgress.status}
+                progress={downloadProgress.progress}
+                currentTrack={downloadProgress.currentTrack?.currentTrack}
+                totalTracks={downloadProgress.currentTrack?.totalTracks}
+                trackName={downloadProgress.currentTrack?.name}
+              />
+            </Box>
+          )}
 
           <form onSubmit={handleSubmit}>
             <Box sx={{ display: "flex", gap: 1, mb: 2 }}>

@@ -7,6 +7,13 @@ const fs = require("fs");
 const path = require("path");
 const archiver = require("archiver");
 require("dotenv").config();
+const {
+  Worker,
+  isMainThread,
+  parentPort,
+  workerData,
+} = require("worker_threads");
+const os = require("os");
 
 // Function to check if a command exists
 function commandExists(command) {
@@ -56,13 +63,14 @@ app.use(
       process.env.NODE_ENV === "production"
         ? process.env.CLIENT_URL
         : "http://localhost:3001",
-    methods: ["GET", "POST"],
-    allowedHeaders: ["Content-Type"],
+    methods: ["GET", "POST", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Accept"],
+    credentials: true,
   })
 );
 
 // Serve static files from React build
-app.use(express.static(path.join(__dirname, "client/build")));
+app.use(express.static(path.join(__dirname, "../client/build")));
 
 // Initialize Spotify API client with environment variables
 const spotifyApi = new SpotifyWebApi({
@@ -89,13 +97,16 @@ setInterval(refreshSpotifyToken, 3600000);
 // Extract Spotify ID from URL
 function extractSpotifyId(url) {
   try {
-    const baseUrl = url.split("?")[0];
-    if (baseUrl.includes("track/")) {
-      return { type: "track", id: baseUrl.split("track/")[1] };
-    } else if (baseUrl.includes("playlist/")) {
-      return { type: "playlist", id: baseUrl.split("playlist/")[1] };
-    } else if (baseUrl.includes("album/")) {
-      return { type: "album", id: baseUrl.split("album/")[1] };
+    // Remove any query parameters
+    const urlWithoutParams = url.split("?")[0];
+
+    // Extract the type and ID
+    if (urlWithoutParams.includes("track/")) {
+      return { type: "track", id: urlWithoutParams.split("track/")[1] };
+    } else if (urlWithoutParams.includes("playlist/")) {
+      return { type: "playlist", id: urlWithoutParams.split("playlist/")[1] };
+    } else if (urlWithoutParams.includes("album/")) {
+      return { type: "album", id: urlWithoutParams.split("album/")[1] };
     }
   } catch (err) {
     console.error("Error extracting Spotify ID:", err);
@@ -103,13 +114,33 @@ function extractSpotifyId(url) {
   return { type: null, id: null };
 }
 
-// Send status update to client
+// Update the sendStatus function to include better error handling and logging
 function sendStatus(progressId, status, progress, currentTrack = null) {
   const res = downloadProgressStreams.get(progressId);
-  if (res) {
-    res.write(
-      `data: ${JSON.stringify({ status, progress, currentTrack })}\n\n`
-    );
+  if (!res || res.writableEnded) {
+    console.log(`No active stream for progress ID: ${progressId}`);
+    return;
+  }
+
+  try {
+    // Structure the data to match the component's expectations
+    const progressData = {
+      status,
+      progress: progress || 0,
+      currentTrack: {
+        currentTrack: currentTrack?.currentTrack || null,
+        totalTracks: currentTrack?.totalTracks || null,
+        name: currentTrack?.name || null,
+      },
+    };
+
+    const data = `data: ${JSON.stringify(progressData)}\n\n`;
+    console.log(`Sending status update for ${progressId}:`, data);
+
+    // Send the data without using flush
+    res.write(data);
+  } catch (error) {
+    console.error(`Error sending status update for ${progressId}:`, error);
   }
 }
 
@@ -149,6 +180,9 @@ app.post("/api/info", async (req, res) => {
     const { url } = req.body;
     console.log("Received request for URL:", url);
 
+    // Ensure we have a valid token before proceeding
+    await refreshSpotifyToken();
+
     const { type, id } = extractSpotifyId(url);
     if (!id) {
       return res.status(400).json({ error: "Invalid Spotify URL" });
@@ -170,9 +204,13 @@ app.post("/api/info", async (req, res) => {
         break;
 
       case "playlist":
-        const playlist = await spotifyApi.getPlaylist(id, {
-          fields: "name",
-        });
+        const playlist = await spotifyApi.getPlaylist(id);
+        // Check if it's an official Spotify playlist
+        if (playlist.body.owner.id === "spotify") {
+          throw new Error(
+            "Only playlists created by users are supported. Official Spotify playlists or radios will not work."
+          );
+        }
         const tracks = await getAllPlaylistTracks(id);
         result = {
           type: "playlist",
@@ -200,6 +238,59 @@ app.post("/api/info", async (req, res) => {
     res.json(result);
   } catch (err) {
     console.error("Error processing request:", err);
+    // Check if token expired and retry once
+    if (err.statusCode === 401) {
+      try {
+        await refreshSpotifyToken();
+        // Retry the request
+        const { type, id } = extractSpotifyId(req.body.url);
+        let result;
+        switch (type) {
+          case "track":
+            const track = await spotifyApi.getTrack(id);
+            result = {
+              type: "track",
+              info: {
+                name: track.body.name,
+                artist: track.body.artists[0].name,
+                album: track.body.album.name,
+                image: track.body.album.images[0]?.url,
+              },
+            };
+            break;
+          case "playlist":
+            const playlist = await spotifyApi.getPlaylist(id);
+            // Check if it's an official Spotify playlist in retry as well
+            if (playlist.body.owner.id === "spotify") {
+              throw new Error(
+                "Only playlists created by users are supported. Official Spotify playlists or radios will not work."
+              );
+            }
+            const tracks = await getAllPlaylistTracks(id);
+            result = {
+              type: "playlist",
+              name: playlist.body.name,
+              tracks: tracks,
+            };
+            break;
+          case "album":
+            const album = await spotifyApi.getAlbumTracks(id);
+            result = {
+              type: "album",
+              tracks: album.body.items.map((track) => ({
+                id: track.id,
+                name: track.name,
+                artist: track.artists[0].name,
+              })),
+            };
+            break;
+        }
+        return res.json(result);
+      } catch (retryErr) {
+        console.error("Error after token refresh:", retryErr);
+        return res.status(500).json({ error: retryErr.message });
+      }
+    }
     res.status(500).json({ error: err.message });
   }
 });
@@ -327,17 +418,49 @@ app.post("/api/download", async (req, res) => {
   }
 });
 
-// Add this new endpoint for progress tracking
+// Update the progress tracking endpoint
 app.get("/api/download-progress/:id", (req, res) => {
   const progressId = req.params.id;
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache");
-  res.setHeader("Connection", "keep-alive");
 
-  // Store the response object to send updates
+  // Set headers for SSE with proper CORS and caching headers
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no",
+    "Access-Control-Allow-Origin":
+      process.env.NODE_ENV === "production"
+        ? process.env.CLIENT_URL
+        : "http://localhost:3001",
+    "Access-Control-Allow-Credentials": "true",
+  });
+
+  // Send initial connection message
+  res.write(`data: ${JSON.stringify({ status: "connected" })}\n\n`);
+
+  // Keep connection alive with more frequent updates
+  const keepAlive = setInterval(() => {
+    if (!res.writableEnded) {
+      res.write(": keepalive\n\n");
+    } else {
+      clearInterval(keepAlive);
+    }
+  }, 10000);
+
+  // Store the response object and interval in the map
   downloadProgressStreams.set(progressId, res);
 
+  // Handle client disconnect
   req.on("close", () => {
+    clearInterval(keepAlive);
+    downloadProgressStreams.delete(progressId);
+    console.log(`Client disconnected for progress ID: ${progressId}`);
+  });
+
+  // Handle errors
+  req.on("error", (error) => {
+    console.error(`Error in progress stream for ${progressId}:`, error);
+    clearInterval(keepAlive);
     downloadProgressStreams.delete(progressId);
   });
 });
@@ -346,6 +469,250 @@ app.get("/api/download-progress/:id", (req, res) => {
 const downloadProgressStreams = new Map();
 const activeDownloads = new Map();
 const downloadEndpoints = new Map(); // Track dynamic endpoints
+
+// Add this helper function for parallel processing
+async function processTracksInParallel(
+  tracks,
+  playlistDir,
+  progressId,
+  maxConcurrent = 3
+) {
+  const batchSize = Math.min(
+    maxConcurrent,
+    os.cpus().length - 1,
+    tracks.length
+  );
+  const results = [];
+  const errors = [];
+  let completedTracks = 0;
+  let inProgress = new Set();
+
+  // Process tracks in batches
+  for (let i = 0; i < tracks.length; i += batchSize) {
+    const batch = tracks.slice(i, i + batchSize);
+    const batchPromises = batch.map(async (track, batchIndex) => {
+      const index = i + batchIndex;
+      try {
+        inProgress.add(index);
+
+        // Send progress update for current track
+        const progress = Math.round((completedTracks / tracks.length) * 100);
+        const progressData = {
+          name: track.name,
+          artist: track.artist,
+          currentTrack: index + 1,
+          totalTracks: tracks.length,
+        };
+
+        // Send initial status for this track
+        sendStatus(progressId, "downloading", progress, progressData);
+
+        // Search for video
+        const searchQuery = `${track.name} ${track.artist}`;
+        const videoUrl = await new Promise((resolve, reject) => {
+          const ytDlpSearch = spawn("yt-dlp", [
+            "ytsearch1:" + searchQuery,
+            "--get-id",
+            "--no-warnings",
+          ]);
+
+          let videoId = "";
+          let error = "";
+
+          ytDlpSearch.stdout.on("data", (data) => {
+            videoId += data.toString().trim();
+          });
+
+          ytDlpSearch.stderr.on("data", (data) => {
+            error += data.toString();
+          });
+
+          ytDlpSearch.on("close", (code) => {
+            if (code === 0 && videoId) {
+              resolve(`https://www.youtube.com/watch?v=${videoId}`);
+            } else {
+              reject(new Error(`Search failed: ${error}`));
+            }
+          });
+        });
+
+        // Download track
+        const sanitizedName = track.name.replace(/[^a-zA-Z0-9]/g, "_");
+        const outputPath = path.join(
+          playlistDir,
+          `${index + 1}-${sanitizedName}.mp3`
+        );
+
+        await new Promise((resolve, reject) => {
+          const ytDlp = spawn("yt-dlp", [
+            "-f",
+            "bestaudio",
+            "-x",
+            "--audio-format",
+            "mp3",
+            "--audio-quality",
+            "0",
+            "-o",
+            outputPath,
+            videoUrl,
+          ]);
+
+          let error = "";
+
+          ytDlp.stdout.on("data", (data) => {
+            console.log(`yt-dlp output for ${track.name}:`, data.toString());
+          });
+
+          ytDlp.stderr.on("data", (data) => {
+            error += data.toString();
+          });
+
+          ytDlp.on("close", (code) => {
+            if (code === 0 && fs.existsSync(outputPath)) {
+              resolve();
+            } else {
+              reject(new Error(`Download failed (code ${code}): ${error}`));
+            }
+          });
+        });
+
+        completedTracks++;
+        inProgress.delete(index);
+
+        results.push({
+          name: track.name,
+          path: outputPath,
+          success: true,
+        });
+
+        // Send completion status for current track
+        sendStatus(
+          progressId,
+          "completed",
+          Math.round((completedTracks / tracks.length) * 100),
+          progressData
+        );
+      } catch (error) {
+        console.error(`Error processing track ${track.name}:`, error);
+        inProgress.delete(index);
+        errors.push({ track, error: error.message });
+        results.push({
+          name: track.name,
+          success: false,
+          error: error.message,
+        });
+
+        // Send error status for this track
+        sendStatus(
+          progressId,
+          "error",
+          Math.round((completedTracks / tracks.length) * 100),
+          {
+            name: track.name,
+            error: error.message,
+            currentTrack: index + 1,
+            totalTracks: tracks.length,
+          }
+        );
+      }
+    });
+
+    // Wait for current batch to complete
+    await Promise.all(batchPromises);
+  }
+
+  return { results, errors };
+}
+
+// Update the download-playlist endpoint to use parallel processing
+app.post("/api/download-playlist", async (req, res) => {
+  const { tracks, playlistName, progressId } = req.body;
+  const actualProgressId = progressId || Date.now().toString();
+  const playlistDir = path.join(downloadsDir, `playlist-${actualProgressId}`);
+
+  try {
+    if (!tracks || !Array.isArray(tracks) || tracks.length === 0) {
+      throw new Error("No tracks provided");
+    }
+
+    console.log(
+      `Starting playlist download with progress ID: ${actualProgressId}`
+    );
+
+    // Create playlist directory
+    await fs.promises.mkdir(playlistDir, { recursive: true });
+
+    // Process tracks in parallel
+    const { results, errors } = await processTracksInParallel(
+      tracks,
+      playlistDir,
+      actualProgressId
+    );
+
+    // Check if any tracks were downloaded successfully
+    const successfulDownloads = results.filter((r) => r.success);
+    if (successfulDownloads.length === 0) {
+      throw new Error("No tracks were downloaded successfully");
+    }
+
+    // Send status update for creating zip
+    sendStatus(actualProgressId, "creating_zip", 100, {
+      message: "Creating zip file...",
+    });
+
+    // Create zip file
+    const zipPath = path.join(playlistDir, "playlist.zip");
+    const output = fs.createWriteStream(zipPath);
+    const archive = archiver("zip", {
+      zlib: { level: 9 },
+    });
+
+    await new Promise((resolve, reject) => {
+      output.on("close", resolve);
+      archive.on("error", reject);
+      archive.pipe(output);
+
+      // Add successfully downloaded tracks to zip
+      for (const result of successfulDownloads) {
+        if (fs.existsSync(result.path)) {
+          archive.file(result.path, { name: `${result.name}.mp3` });
+        }
+      }
+
+      archive.finalize();
+    });
+
+    // Send completion status
+    sendStatus(actualProgressId, "complete", 100, {
+      message: "Download complete!",
+      errors:
+        errors.length > 0 ? `Failed to download ${errors.length} tracks` : null,
+    });
+
+    // Read and send zip file
+    const fileBuffer = await fs.promises.readFile(zipPath);
+    const safeFilename = sanitizeFilename(playlistName || "playlist");
+
+    res.set({
+      "Content-Type": "application/zip",
+      "Content-Length": fileBuffer.length,
+      "Content-Disposition": `attachment; filename="${safeFilename}.zip"`,
+    });
+
+    res.send(fileBuffer);
+  } catch (err) {
+    console.error("Playlist download error:", err);
+    sendStatus(actualProgressId, "error", null, {
+      error: err.message,
+    });
+    if (fs.existsSync(playlistDir)) {
+      await fs.promises.rm(playlistDir, { recursive: true, force: true });
+    }
+    if (!res.headersSent) {
+      res.status(500).json({ error: err.message });
+    }
+  }
+});
 
 // Add this new endpoint for aborting downloads
 app.post("/api/download-playlist/:id/abort", async (req, res) => {
@@ -378,14 +745,6 @@ app.post("/api/download-playlist/:id/abort", async (req, res) => {
       }
       downloadInfo.isAborted = true;
       activeDownloads.delete(progressId);
-    }
-
-    // Remove dynamic endpoint if it exists
-    const routeIndex = downloadEndpoints.get(progressId);
-    if (routeIndex !== undefined) {
-      console.log(`Removing dynamic endpoint for ID: ${progressId}`);
-      app._router.stack.splice(routeIndex, 1);
-      downloadEndpoints.delete(progressId);
     }
 
     // Clean up the playlist directory
@@ -425,161 +784,16 @@ async function processInParallel(items, concurrency, processor) {
   return results;
 }
 
-app.post("/api/download-playlist", async (req, res) => {
-  const progressId = Date.now().toString();
-  const playlistDir = path.join(downloadsDir, `playlist-${progressId}`);
+// Add this helper function at the top with other functions
+function sanitizeFilename(filename) {
+  // Remove or replace invalid characters
+  return filename
+    .replace(/[^a-zA-Z0-9-_. ]/g, "") // Remove any characters that aren't alphanumeric, dash, underscore, dot, or space
+    .replace(/\s+/g, "_") // Replace spaces with underscores
+    .trim(); // Remove leading/trailing spaces
+}
 
-  try {
-    const { tracks, playlistName } = req.body;
-    if (!tracks || !Array.isArray(tracks) || tracks.length === 0) {
-      throw new Error("No tracks provided");
-    }
-
-    // Create playlist directory
-    await fs.promises.mkdir(playlistDir, { recursive: true });
-
-    // Process tracks sequentially
-    const downloadedTracks = [];
-    for (const [index, track] of tracks.entries()) {
-      try {
-        console.log(
-          `Processing track ${index + 1}/${tracks.length}: ${track.name}`
-        );
-        const searchQuery = `${track.name} ${track.artist}`;
-
-        // Use yt-dlp to search
-        const videoUrl = await new Promise((resolve, reject) => {
-          const ytDlpSearch = spawn("yt-dlp", [
-            "ytsearch1:" + searchQuery,
-            "--get-id",
-            "--no-warnings",
-          ]);
-
-          let videoId = "";
-          let error = "";
-
-          ytDlpSearch.stdout.on("data", (data) => {
-            videoId += data.toString().trim();
-          });
-
-          ytDlpSearch.stderr.on("data", (data) => {
-            error += data.toString();
-          });
-
-          ytDlpSearch.on("close", (code) => {
-            if (code === 0 && videoId) {
-              resolve(`https://www.youtube.com/watch?v=${videoId}`);
-            } else {
-              reject(new Error(`Search failed: ${error}`));
-            }
-          });
-        });
-
-        const sanitizedName = track.name.replace(/[^a-zA-Z0-9]/g, "_");
-        const outputPath = path.join(
-          playlistDir,
-          `${index + 1}-${sanitizedName}.mp3`
-        );
-
-        // Download track
-        await new Promise((resolve, reject) => {
-          const ytDlp = spawn("yt-dlp", [
-            "-f",
-            "bestaudio",
-            "-x",
-            "--audio-format",
-            "mp3",
-            "--audio-quality",
-            "0",
-            "-o",
-            outputPath,
-            videoUrl,
-          ]);
-
-          let error = "";
-
-          ytDlp.stdout.on("data", (data) => {
-            console.log(`yt-dlp output: ${data}`);
-          });
-
-          ytDlp.stderr.on("data", (data) => {
-            error += data.toString();
-          });
-
-          ytDlp.on("close", (code) => {
-            if (code === 0 && fs.existsSync(outputPath)) {
-              downloadedTracks.push({
-                name: track.name,
-                path: outputPath,
-              });
-              resolve();
-            } else {
-              reject(new Error(`Download failed (code ${code}): ${error}`));
-            }
-          });
-        });
-      } catch (error) {
-        console.error(`Error downloading track ${track.name}:`, error);
-      }
-    }
-
-    if (downloadedTracks.length === 0) {
-      throw new Error("No tracks were downloaded successfully");
-    }
-
-    // Create a zip file containing all tracks
-    const zipPath = path.join(playlistDir, "playlist.zip");
-    const output = fs.createWriteStream(zipPath);
-    const archive = archiver("zip", {
-      zlib: { level: 9 }, // Maximum compression
-    });
-
-    await new Promise((resolve, reject) => {
-      output.on("close", resolve);
-      archive.on("error", reject);
-      archive.pipe(output);
-
-      // Add each track to the zip
-      for (const track of downloadedTracks) {
-        archive.file(track.path, { name: `${track.name}.mp3` });
-      }
-
-      archive.finalize();
-    });
-
-    // Wait for the archive to finish writing
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-
-    // Read the zip file into memory
-    const fileBuffer = await fs.promises.readFile(zipPath);
-
-    // Clean up all files
-    await fs.promises.rm(playlistDir, { recursive: true, force: true });
-
-    // Set headers for zip download
-    res.set({
-      "Content-Type": "application/zip",
-      "Content-Length": fileBuffer.length,
-      "Content-Disposition": `attachment; filename="${
-        playlistName || "playlist"
-      }.zip"`,
-    });
-
-    // Send the zip file
-    res.send(fileBuffer);
-  } catch (err) {
-    console.error("Playlist download error:", err);
-    // Clean up on error
-    if (fs.existsSync(playlistDir)) {
-      await fs.promises.rm(playlistDir, { recursive: true, force: true });
-    }
-    if (!res.headersSent) {
-      res.status(500).json({ error: err.message });
-    }
-  }
-});
-
-// Add this function to extract YouTube video ID
+// Function to extract YouTube video ID
 function extractYoutubeId(url) {
   const regExp =
     /^.*((youtu.be\/)|(v\/)|(\/u\/\w\/)|(embed\/)|(watch\?))\??v?=?([^#&?]*).*/;
@@ -660,19 +874,47 @@ app.post("/api/youtube-download", async (req, res) => {
     const ytDlpArgs =
       format === "audio"
         ? [
-            "-f",
-            "bestaudio",
-            "-x",
+            "--format",
+            "bestaudio/best",
+            "--extract-audio",
             "--audio-format",
             "mp3",
             "--audio-quality",
             "0",
+            "--no-check-certificate",
+            "--user-agent",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "--referer",
+            "https://www.youtube.com/",
+            "--add-header",
+            "Accept-Language:en-US,en;q=0.9",
+            "--geo-bypass",
+            "--no-playlist",
+            "--ignore-errors",
+            "--no-warnings",
+            "--extractor-args",
+            "youtube:player_client=android",
+            "--quiet",
           ]
         : [
-            "-f",
-            `bestvideo[height<=${resolution}][ext=mp4]+bestaudio[ext=m4a]/best[height<=${resolution}][ext=mp4]/best[ext=mp4]`,
+            "--format",
+            `bestvideo[height<=${resolution}]+bestaudio/best[height<=${resolution}]/best`,
             "--merge-output-format",
             "mp4",
+            "--no-check-certificate",
+            "--user-agent",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "--referer",
+            "https://www.youtube.com/",
+            "--add-header",
+            "Accept-Language:en-US,en;q=0.9",
+            "--geo-bypass",
+            "--no-playlist",
+            "--ignore-errors",
+            "--no-warnings",
+            "--extractor-args",
+            "youtube:player_client=android",
+            "--quiet",
           ];
 
     console.log("Starting download with args:", [
@@ -682,7 +924,7 @@ app.post("/api/youtube-download", async (req, res) => {
       `https://www.youtube.com/watch?v=${videoId}`,
     ]);
 
-    // First, download the file completely
+    // Download with additional headers and options
     await new Promise((resolve, reject) => {
       ytDlp = spawn("yt-dlp", [
         ...ytDlpArgs,
@@ -752,19 +994,9 @@ app.post("/api/youtube-download", async (req, res) => {
   }
 });
 
-// Add this after other middleware setup
-if (process.env.NODE_ENV === "production") {
-  // Serve static files from the React build directory
-  app.use(express.static(path.join(__dirname, "client/build")));
-
-  // Handle React routing, return all requests to React app
-  app.get("*", function (req, res) {
-    res.sendFile(path.join(__dirname, "client/build", "index.html"));
-  });
-}
-
-app.get("*", (req, res) => {
-  res.sendFile(path.join(__dirname, "client/build", "index.html"));
+// Handle React routing, return all requests to React app
+app.get("*", function (req, res) {
+  res.sendFile(path.join(__dirname, "../client/build", "index.html"));
 });
 
 const PORT = process.env.PORT || 3000;
