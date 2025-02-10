@@ -15,51 +15,6 @@ const {
 } = require("worker_threads");
 const os = require("os");
 
-// Add after the requires
-const proxyList = [];
-let lastProxyUpdate = 0;
-const PROXY_UPDATE_INTERVAL = 30 * 60 * 1000; // 30 minutes
-
-async function updateProxyList() {
-  try {
-    console.log("Updating proxy list...");
-    const response = await axios.get(
-      "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt"
-    );
-    const newProxies = response.data.split("\n").filter((line) => line.trim());
-
-    // Clear the existing proxy list
-    proxyList.length = 0;
-
-    // Add new proxies
-    proxyList.push(...newProxies);
-    lastProxyUpdate = Date.now();
-
-    console.log(`Updated proxy list with ${proxyList.length} proxies`);
-  } catch (error) {
-    console.error("Failed to update proxy list:", error);
-  }
-}
-
-// Function to get a working proxy
-async function getWorkingProxy() {
-  // Update proxy list if it's been more than 30 minutes
-  if (Date.now() - lastProxyUpdate > PROXY_UPDATE_INTERVAL) {
-    await updateProxyList();
-  }
-
-  // If no proxies available, try updating
-  if (proxyList.length === 0) {
-    await updateProxyList();
-  }
-
-  // Get a random proxy
-  const randomIndex = Math.floor(Math.random() * proxyList.length);
-  const proxy = proxyList[randomIndex];
-
-  return proxy ? `http://${proxy}` : null;
-}
-
 // Function to check if a command exists
 function commandExists(command) {
   try {
@@ -347,22 +302,9 @@ app.post("/api/info", async (req, res) => {
   }
 });
 
-// Add proxy configuration
-const PROXY_LIST = process.env.PROXY_LIST
-  ? process.env.PROXY_LIST.split(",")
-  : [];
-let currentProxyIndex = 0;
-
-function getNextProxy() {
-  if (PROXY_LIST.length === 0) return null;
-  currentProxyIndex = (currentProxyIndex + 1) % PROXY_LIST.length;
-  return PROXY_LIST[currentProxyIndex];
-}
-
 // Update the getYtDlpArgs function
-const getYtDlpArgs = async (format, resolution = null) => {
-  const proxy = await getWorkingProxy();
-  const baseArgs = [
+const getYtDlpArgs = (format, resolution = null) => {
+  return [
     "--format",
     format === "audio"
       ? "bestaudio/best"
@@ -401,13 +343,6 @@ const getYtDlpArgs = async (format, resolution = null) => {
     "youtube:player_client=android",
     "--quiet",
   ];
-
-  if (proxy) {
-    console.log("Using proxy:", proxy);
-    baseArgs.push("--proxy", proxy);
-  }
-
-  return baseArgs;
 };
 
 // Update the download function
@@ -426,7 +361,7 @@ app.post("/api/download", async (req, res) => {
       });
 
       const searchQuery = `${track_name} ${artist_name}`;
-      const ytDlpArgs = await getYtDlpArgs("audio");
+      const ytDlpArgs = getYtDlpArgs("audio");
 
       const videoUrl = await new Promise((resolve, reject) => {
         const ytDlpSearch = spawn("yt-dlp", [
@@ -1006,7 +941,7 @@ app.post("/api/youtube-download", async (req, res) => {
       outputPath = path.join(downloadsDir, filename);
 
       // Get args with proxy
-      const ytDlpArgs = await getYtDlpArgs(format, resolution);
+      const ytDlpArgs = getYtDlpArgs(format, resolution);
 
       console.log("Starting download with args:", [
         ...ytDlpArgs,
@@ -1120,13 +1055,11 @@ process.on("unhandledRejection", (err) => {
 
 // Update the port configuration
 const PORT = process.env.PORT || 3000;
-const HOST = process.env.HOST || "0.0.0.0"; // Allow external connections
-
 (async () => {
   try {
     await installPrerequisites();
     app.listen(PORT, HOST, () => {
-      console.log(`Server running on ${HOST}:${PORT}`);
+      console.log(`Server running on ${PORT}`);
       console.log("Node environment:", process.env.NODE_ENV);
     });
   } catch (error) {
