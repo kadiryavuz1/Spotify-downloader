@@ -81,10 +81,15 @@ if (process.env.NODE_ENV === "production") {
 
 // Initialize Spotify API client with environment variables
 const spotifyApi = new SpotifyWebApi({
-  clientId: process.env.SPOTIFY_CLIENT_ID || "b0ad6d6cea8b4727a4d391ccc8f5c110",
-  clientSecret:
-    process.env.SPOTIFY_CLIENT_SECRET || "4ed3757cf3914fc5a2ddc4e93c81d781",
+  clientId: process.env.SPOTIFY_CLIENT_ID,
+  clientSecret: process.env.SPOTIFY_CLIENT_SECRET,
 });
+
+// Validate that required environment variables are set
+if (!process.env.SPOTIFY_CLIENT_ID || !process.env.SPOTIFY_CLIENT_SECRET) {
+  console.error('Error: Missing required Spotify API credentials. Please set SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET environment variables.');
+  process.exit(1);
+}
 
 // Refresh Spotify access token
 async function refreshSpotifyToken() {
