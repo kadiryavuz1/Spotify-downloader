@@ -79,7 +79,7 @@ module.exports = async (req, res) => {
         break;
 
       default:
-        return res.status(400).json({ error: "Invalid content type" });
+        return res.status(400).json({ error: "Invalid content typee" });
     }
 
     res.json(result);
